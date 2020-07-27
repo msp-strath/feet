@@ -94,7 +94,7 @@ data Value = VNeutral Type Neutral
            | VZero
            | VSucc Value
            -- group elements
-           | VGrp [(Bool, Value)] -- inverted?
+           | VGrp [(Bool, Value)] -- Boolean: is it inverted?
   deriving Show
 
 data Neutral = NVar Int -- deBruijn level
@@ -220,13 +220,13 @@ quoteGroup :: [(Bool, Chk)] -> Chk
 quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian; is it this easy?
     where
       -- slide elements from right to left, and cancel if we look at two inverses
-      -- Note: we know there are no units in the input list
       cancel :: Bwd (Bool, Chk) -> [(Bool,Chk)] -> [Chk]
       cancel gz [] = mapzs invert gz
         where
           invert (True, x) = GInv x
           invert (False, x) = x
       cancel B0 (g:gs) = cancel (B0 :< g) gs
+      cancel gz ((_,GUnit):gs) = cancel gz gs -- don't think this can happen, but just in case
       cancel (gz :< g) (g':gs) = if inverse g g' then cancel gz gs else cancel (gz :< g :< g') gs
         where inverse (ig, eg) (ih, eh) = ig == not ih && eg == eh
 

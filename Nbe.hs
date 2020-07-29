@@ -7,6 +7,8 @@ import Data.Maybe
 import Data.List
 import Control.Arrow ((***))
 
+import Debug.Trace
+
 data Bwd x = B0 | Bwd x :< x
   deriving (Show, Eq, Functor, Foldable, Traversable)
 
@@ -46,7 +48,7 @@ data Syn = Chk ::: Chk -- type annotation
          | Fst Syn
          | Snd Syn
          -- naturals
-         | NatRec Chk Chk Chk Syn
+         | ListRec Chk Chk Chk Syn
          -- group
   deriving (Show, Eq, Ord)
 
@@ -55,7 +57,7 @@ data Chk = Inf Syn  -- embedding inferable
          | Ty
          | Pi Chk Chk
          | Sg Chk Chk
-         | Nat
+         | List Chk
          | Unit
          | G  -- group
          -- functions
@@ -63,8 +65,9 @@ data Chk = Inf Syn  -- embedding inferable
          -- sigma
          | Pair Chk Chk
          -- naturals
-         | Zero
-         | Succ Chk
+         | Nil
+         | Single Chk
+         | Chk :++: Chk
          -- unit element
          | Ast
          -- group elements
@@ -73,22 +76,31 @@ data Chk = Inf Syn  -- embedding inferable
          | GInv Chk
   deriving (Show, Eq, Ord)
 
+(+++) :: Chk -> Chk -> Chk
+Nil +++ ys = ys
+xs  +++ Nil = xs
+(xs :++: ys) +++ zs = xs +++ (ys +++ zs)
+xs  +++ ys = xs :++: ys
+
 type Env = [Value]
 
 data Closure = Cl Chk Env
+             | ClId
+             | ClComp Closure Closure
   deriving Show
 
-data Closure2 = Cl2 Chk Env -- closure with two free variables
+data Closure3 = Cl3 Chk Env -- closure with three free variables
+              | ClComp3 Closure3 Closure Closure Closure
   deriving Show
 
 type Type = Value
 
-data Value = VNeutral Type Neutral
+data Value = VNeutral Type Neutral -- type is not list
            -- types
            | VTy
            | VPi Type Closure
            | VSg Type Closure
-           | VNat
+           | VList Type
            | VUnit
            | VG
            -- functions
@@ -96,8 +108,9 @@ data Value = VNeutral Type Neutral
            -- sigma
            | VPair Value Value
            -- nats
-           | VZero
-           | VSucc Value
+           | VNil
+           | VCons Value Value
+           | VAppend Neutral Value
            -- unit element
            | VAst
            -- group elements
@@ -106,15 +119,17 @@ data Value = VNeutral Type Neutral
 
 type GGenerator = Neutral
 
-data Neutral = NVar Int -- deBruijn level
-             | NApp Neutral Normal
+data Neutral = NVar Int Type -- deBruijn level
+             | NApp Neutral Value
              | NFst Neutral
              | NSnd Neutral
-             | NNRec Closure Normal Closure2 Neutral
+             | NLRec Closure Value Closure3 Neutral
   deriving Show
 
-data Normal = No Value Type
+{-
+data Cell = Cell Value Type
   deriving Show
+-}
 
 evalSyn :: Syn -> Env -> Value
 evalSyn (s ::: _) rho = evalChk s rho
@@ -122,20 +137,27 @@ evalSyn (Var x) rho = rho !! x
 evalSyn (f :$: s) rho = vapp (evalSyn f rho) (evalChk s rho)
 evalSyn (Fst e) rho = vfst (evalSyn e rho)
 evalSyn (Snd e) rho = vsnd (evalSyn e rho)
-evalSyn (NatRec t bas step n) rho = vnatrec (Cl t rho) (evalChk bas rho) (Cl2 step rho) (evalSyn n rho)
+evalSyn (ListRec t bas step n) rho = vlistrec (Cl t rho) (evalChk bas rho) (Cl3 step rho) (evalSyn n rho)
+
+{-
+vlistrecT a b c d =
+  trace ("\n=====vlistrec=====\nt: " ++ show a ++ "\nbase: " ++ show b ++ "\nstep: " ++ show c ++ "\nv: " ++ show d ++ "\n==> " ++ show t ++ "\n==============") $ t
+  where t = vlistrec a b c d
+-}
 
 evalChk :: Chk -> Env -> Value
 evalChk (Inf e) rho = evalSyn e rho
 evalChk Ty rho = VTy
 evalChk (Pi a b) rho = VPi (evalChk a rho) (Cl b rho)
 evalChk (Sg a b) rho = VSg (evalChk a rho) (Cl b rho)
-evalChk Nat rho = VNat
+evalChk (List a) rho = VList (evalChk a rho)
 evalChk Unit rho = VUnit
 evalChk G rho = VG
 evalChk (Lam s) rho = VLam (Cl s rho)
 evalChk (Pair s t) rho = VPair (evalChk s rho) (evalChk t rho)
-evalChk Zero rho = VZero
-evalChk (Succ s) rho = VSucc (evalChk s rho)
+evalChk Nil rho = VNil
+evalChk (Single s) rho = VCons (evalChk s rho) VNil
+evalChk (s :++: t) rho = vappend (evalChk s rho) (evalChk t rho)
 evalChk Ast rho = VAst
 -- Group
 evalChk GUnit rho = vgunit
@@ -143,43 +165,60 @@ evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
-clapp (Cl s rho) a = evalChk s (a:rho)
+clapp (Cl s rho)      = evalChk s . (:rho)
+clapp ClId            = id
+clapp (ClComp cl cl') = clapp cl . clapp cl'
 
-clapp2 :: Closure2 -> Value -> Value -> Value
-clapp2 (Cl2 s rho) a b = evalChk s (b:a:rho)
+clapp3 :: Closure3 -> Value -> Value -> Value -> Value
+clapp3 (Cl3 s rho) a b c = evalChk s (c:b:a:rho)
+clapp3 (ClComp3 f a b c) x y z = clapp3 f (clapp a x) (clapp b y) (clapp c z)
+
+vneutral :: Type -> Neutral -> Value
+vneutral VUnit n = VAst
+vneutral (VList a) n = VAppend n VNil
+vneutral VG n = VGrp [(False, n)]
+vneutral ty n = VNeutral ty n
 
 vapp :: Value -> Value -> Value
 vapp (VLam cl) t = clapp cl t
-vapp (VNeutral (VPi a b) n) t = VNeutral (clapp b t) (NApp n (No a t))
+vapp (VNeutral (VPi a b) n) t = vneutral (clapp b t) (NApp n a)
 vapp s t = error $ "vapp of " ++ show s
 
 vfst :: Value -> Value
 vfst (VPair a b) = a
-vfst (VNeutral (VSg a b) n) = VNeutral a (NFst n)
+vfst (VNeutral (VSg a b) n) = vneutral a (NFst n)
 vfst x           = error $ "vfst applied to non-pair " ++ show x
 
 vsnd :: Value -> Value
 vsnd (VPair a b) = b
-vsnd p@(VNeutral (VSg a b) n) = VNeutral (clapp b (vfst p)) (NSnd n)
+vsnd p@(VNeutral (VSg a b) n) = vneutral (clapp b (vfst p)) (NSnd n)
 vsnd x           = error $ "vsnd applied to non-pair " ++ show x
 
-vnatrec :: Closure -> Value -> Closure2 -> Value -> Value
-vnatrec t base step VZero = base
-vnatrec t base step (VSucc n) = clapp2 step n (vnatrec t base step n)
-vnatrec t base step n@(VNeutral ty e) = VNeutral (clapp t n) (NNRec t (No base (clapp t VZero)) step e)
+vlistrec :: Closure -> Value -> Closure3 -> Value -> Value
+-- vlistrec t base step v | trace ("\n===listrec===\nt: " ++ show t ++ "\nbase: " ++ show base ++ "\nstep: " ++ show step ++ "\nv: " ++ show v ++ "\n=============\n") False = undefined
+vlistrec t base step VNil = base
+vlistrec t base step (VCons x xs) = clapp3 step x xs (vlistrec t base step xs)
+vlistrec t base step (VAppend xs ys) = vneutral (clapp t (VAppend xs ys)) (NLRec (ClComp t appCl) (vlistrec t base step ys) (ClComp3 step ClId appCl ClId) xs)
+  where appCl = Cl (Inf (Var 0) :++: Inf (Var 1)) [ys]
+-- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
+
+vappend :: Value -> Value -> Value
+vappend VNil ys = ys
+vappend (VCons x xs) ys = VCons x (vappend xs ys)
+vappend (VAppend xs zs) ys = VAppend xs (vappend zs ys)
+vappend xs ys = error $ "vappend applied to " ++ show xs
 
 vgroup :: Value -> Value
 vgroup v@(VGrp as) = v
 vgroup (VNeutral VG n) = VGrp [(False,n)]
 vgroup z = error $ "vgroup: " ++ show z ++ " ?!?"
 
-vgunit :: Value
-vgunit = VGrp []
-
 unvgrp :: Value -> [(Bool, GGenerator)]
 unvgrp v = case vgroup v of
   (VGrp as) -> as
 
+vgunit :: Value
+vgunit = VGrp []
 
 vginv :: Value -> Value
 vginv v = VGrp $ reverse $ map (not *** id) (unvgrp v)
@@ -188,18 +227,15 @@ vgmult :: Value -> Value -> Value
 vgmult v v' = VGrp $ unvgrp v ++ unvgrp v'
 
 vvar :: Type -> Int -> Value
-vvar a i = VNeutral a (NVar i)
+vvar a i = vneutral a (NVar i a)
 
 quote :: Int -> Type -> Value -> Chk
+-- quote i ty v | trace ("quote ty: " ++ show ty ++ " v: " ++ show v) False = undefined
 quote i (VPi a b) f = let x = vvar a i in
   Lam (quote (i + 1) (clapp b x) (vapp f x))
 quote i (VSg a b) p = let p1 = vfst p; p2 = vsnd p in
   Pair (quote i a p1) (quote i (clapp b p1) p2)
-quote i VNat v = case v of
-  VZero        -> Zero
-  VSucc n      -> Succ (quote i VNat n)
-  VNeutral _ e -> Inf $ quoteNeutral i e
-  x            -> error $ show x
+quote i (VList a) v = quoteList i a v
 quote i VUnit v = Ast
 quote i VTy v = case v of
   VTy -> Ty
@@ -207,7 +243,7 @@ quote i VTy v = case v of
     Pi (quote i VTy a) (quote (i + 1) VTy (clapp b x))
   (VSg a b) -> let x = vvar a i in
     Sg (quote i VTy a) (quote (i + 1) VTy (clapp b x))
-  VNat -> Nat
+  VList a -> List (quote i VTy a)
   VUnit -> Unit
   VG -> G
   VNeutral _ e -> Inf $ quoteNeutral i e
@@ -215,20 +251,42 @@ quote i VTy v = case v of
 quote i (VNeutral _ _) (VNeutral _ e) = Inf $ quoteNeutral i e
 quote i VG v = quoteGroup $ map (id *** quoteNeutral i) (unvgrp v)
 
+quoteNeutralTy :: Int -> Neutral -> (Syn, Type)
+quoteNeutralTy i (NVar x ty) = (Var (i - (x + 1)), ty) -- convert from levels to indices
+quoteNeutralTy i (NApp f a) = case quoteNeutralTy i f of
+ (f', VPi s t) -> (f' :$: quote i s a, clapp t a)
+ x  -> error $ "quoteNeutralTy: app of " ++ show x
+quoteNeutralTy i (NFst e) = case quoteNeutralTy i e of
+  (e', VSg s t) -> (Fst e', s)
+  x -> error $ "quoteNeutralTy: fst of " ++ show x
+quoteNeutralTy i (NSnd e) = case quoteNeutralTy i e of
+  (e', VSg s t) -> (Snd e', clapp t (vfst (vneutral (VSg s t) e)))
+  x -> error $ "quoteNeutralTy: snd of " ++ show x
+quoteNeutralTy i (NLRec t base step e) = case quoteNeutralTy i e of
+  (e', VList a) ->
+    let
+      xs = vvar (VList a) i
+      txs = clapp t xs
+      y = vvar a i
+      ys = vvar (VList a) (i + 1)
+      ysh = vvar (clapp t ys) (i + 2)
+    in
+      (ListRec (quote (i + 1) VTy txs)
+               (quote i (clapp t VNil) base)
+               (quote (i + 3) (clapp t (VCons y ys)) (clapp3 step y ys ysh))
+               e', clapp t (vneutral (VList a) e))
+  x -> error $ "quoteNeutralTy: listrec of " ++ show x
+
 quoteNeutral :: Int -> Neutral -> Syn
-quoteNeutral i (NVar x) = Var (i - (x + 1)) -- convert from levels to indices
-quoteNeutral i (NApp e (No ty n)) = quoteNeutral i e :$: quote i ty n
-quoteNeutral i (NFst e) = Fst (quoteNeutral i e)
-quoteNeutral i (NSnd e) = Snd (quoteNeutral i e)
-quoteNeutral i (NNRec t (No base tb) step e) =
-  let x  = vvar VNat i
-      tx = clapp t x
-      y  = vvar tx (i + 1)
-  in
-  NatRec (quote (i + 1) VTy tx)
-         (quote i tb base)
-         (quote (i + 2) (clapp t (VSucc x)) (clapp2 step x y))
-         (quoteNeutral i e)
+quoteNeutral i = fst . quoteNeutralTy i
+
+quoteList :: Int -> Type -> Value -> Chk
+quoteList i ty VNil = Nil
+quoteList i ty (VCons x xs) = Single (quote i ty x) +++ quoteList i ty xs
+quoteList i ty (VAppend ns ys) = Inf (quoteNeutral i ns) +++ quoteList i ty ys
+-- no case for VNeutral, because of our invariant
+quoteList i ty x = error $ "quoteList applied to " ++ show x
+
 
 quoteGroup :: [(Bool, Syn)] -> Chk
 quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian; is it this easy?
@@ -282,20 +340,22 @@ synth i gamma (Snd s) = do
   case t of
     VSg a b -> pure $ clapp b (evalSyn (Fst s) (ctxtToEnv gamma))
     y -> error $ "expected Sg, got " ++ show y
-synth i gamma (NatRec t base step e) = do
+synth i gamma (ListRec t base step e) = do
   te <- synth i gamma e
   case te of
-    VNat -> do
-      let x = vvar VNat i
+    VList a -> do
+      let xs = vvar (VList a) i
       let rho = ctxtToEnv gamma
-      isType (i+1) ((x,VNat):gamma) t
-      check i gamma (evalChk t (VZero:rho)) base
-      let ty = evalChk t (x:rho)
-      let y = vvar ty (i + 1)
-      let tsucx = evalChk t (VSucc x:rho)
-      check (i + 2) ((y, ty):(x,VNat):gamma) tsucx step
+      isType (i+1) ((xs,VList a):gamma) t
+      check i gamma (evalChk t (VNil:rho)) base
+      let y   = vvar a i
+      let ys  = vvar (VList a) (i + 1)
+      let tys = evalChk t (ys:rho)
+      let ysh = vvar tys (i + 2)
+      let tyys = evalChk t (VCons y ys:rho)
+      check (i + 3) ((ysh, tys):(ys, VList a):(y,a):gamma) tyys step
       pure $ evalChk t ((evalSyn e rho):rho)
-    z    -> error $ "expected Nat, got " ++ show z
+    z    -> error $ "expected List, got " ++ show z
 
 check :: Int -> Context -> Type -> Chk -> Maybe ()
 check i gamma ty (Inf e) = do
@@ -319,10 +379,13 @@ check i gamma ty (Sg a b) = case ty of
     let x = vvar a' i
     isType (i + 1) ((x,a'):gamma) b
   z   -> error $ "expected Ty, got " ++ show z
+check i gamma ty Unit = case ty of
+  VTy -> pure ()
+  z   -> error $ "expected Ty, got " ++ show z
 check i gamma ty G = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty Nat = case ty of
+check i gamma ty (List a) = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
 check i gamma ty (Lam s) = case ty of
@@ -336,12 +399,20 @@ check i gamma ty (Pair s t) = case ty of
     let s' = evalChk s (ctxtToEnv gamma)
     check i ((s', a):gamma) (clapp b s') t
   z   -> error $ "expected Sg, got " ++ show z
-check i gamma ty Zero = case ty of
-  VNat -> pure ()
-  z   -> error $ "expected Nat, got " ++ show z
-check i gamma ty (Succ s) = case ty of
-  VNat -> check i gamma VNat s
-  z   -> error $ "expected Nat, got " ++ show z
+check i gamma ty Ast = case ty of
+  VUnit -> pure ()
+  z   -> error $ "expected Unit, got " ++ show z
+check i gamma ty Nil = case ty of
+  VList a -> pure ()
+  z   -> error $ "expected List, got " ++ show z
+check i gamma ty (Single s) = case ty of
+  VList a -> check i gamma a s
+  z   -> error $ "expected List, got " ++ show z
+check i gamma ty (s :++: t) = case ty of
+  VList a -> do
+    check i gamma (VList a) s
+    check i gamma (VList a) t
+  z   -> error $ "expected List, got " ++ show z
 check i gamma ty GUnit = case ty of
   VG -> pure ()
   z   -> error $ "expected G, got " ++ show z
@@ -363,10 +434,34 @@ isType i gamma t = check i gamma VTy t
 
 -- tests
 
+
+
 f = (Lam $ Lam $ body) ::: Pi G (Pi G G) where
     body = x :*: x :*: x :*: y :*: GInv (y :*: y :*: x)
     x = Inf $ Var 0
     y = Inf $ Var 1
+
+nat = List Unit
+zero = Nil
+suc = Lam $ Single Ast :++: Inf (Var 0)
+
+sucTy = Pi nat nat
+
+append = (Lam $ Lam $ Lam $ Inf $ ListRec (List (Inf $ Var 3)) (Inf $ Var 0) (Single (Inf $ Var 2) :++: Inf (Var 0)) (Var 1))
+         :::
+         Pi Ty (Pi (List (Inf $ Var 0)) (Pi (List (Inf $ Var 1)) (List (Inf $ Var 2))))
+
+two = ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: zero)) :$: Inf ((suc ::: sucTy) :$: zero)
+
+two' = Lam (Inf $ ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: Inf (Var 0))) :$: Inf ((suc ::: sucTy) :$: zero))
+
+allList = Lam {-A-} $ Lam {-P-} $ Lam {-xs-} $ Inf $
+  ListRec Ty Unit (Sg (Inf $ (Var 4) :$: Inf (Var 2)) (Inf $ Var 1)) (Var 0)
+
+allListTy = Pi Ty (Pi (Pi (Inf $ Var 0) Ty) (Pi (List (Inf $ Var 1)) Ty))
+
+r = Lam $ Lam $ Inf $
+  (allList ::: allListTy) :$: Unit :$: (Lam Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
 
 {-
 

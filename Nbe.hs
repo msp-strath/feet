@@ -5,6 +5,7 @@ module Nbe where
 
 import Data.Maybe
 import Data.List
+import Control.Arrow ((***))
 
 data Bwd x = B0 | Bwd x :< x
   deriving (Show, Eq, Functor, Foldable, Traversable)
@@ -55,6 +56,7 @@ data Chk = Inf Syn  -- embedding inferable
          | Pi Chk Chk
          | Sg Chk Chk
          | Nat
+         | Unit
          | G  -- group
          -- functions
          | Lam Chk
@@ -63,6 +65,8 @@ data Chk = Inf Syn  -- embedding inferable
          -- naturals
          | Zero
          | Succ Chk
+         -- unit element
+         | Ast
          -- group elements
          | GUnit
          | Chk :*: Chk
@@ -85,6 +89,7 @@ data Value = VNeutral Type Neutral
            | VPi Type Closure
            | VSg Type Closure
            | VNat
+           | VUnit
            | VG
            -- functions
            | VLam Closure
@@ -93,9 +98,13 @@ data Value = VNeutral Type Neutral
            -- nats
            | VZero
            | VSucc Value
+           -- unit element
+           | VAst
            -- group elements
-           | VGrp [(Bool, Value)] -- Boolean: is it inverted?
+           | VGrp [(Bool, GGenerator)] -- Boolean: is it inverted?
   deriving Show
+
+type GGenerator = Neutral
 
 data Neutral = NVar Int -- deBruijn level
              | NApp Neutral Normal
@@ -121,11 +130,13 @@ evalChk Ty rho = VTy
 evalChk (Pi a b) rho = VPi (evalChk a rho) (Cl b rho)
 evalChk (Sg a b) rho = VSg (evalChk a rho) (Cl b rho)
 evalChk Nat rho = VNat
+evalChk Unit rho = VUnit
 evalChk G rho = VG
 evalChk (Lam s) rho = VLam (Cl s rho)
 evalChk (Pair s t) rho = VPair (evalChk s rho) (evalChk t rho)
 evalChk Zero rho = VZero
 evalChk (Succ s) rho = VSucc (evalChk s rho)
+evalChk Ast rho = VAst
 -- Group
 evalChk GUnit rho = vgunit
 evalChk (GInv s) rho = vginv (evalChk s rho)
@@ -157,20 +168,24 @@ vnatrec t base step VZero = base
 vnatrec t base step (VSucc n) = clapp2 step n (vnatrec t base step n)
 vnatrec t base step n@(VNeutral ty e) = VNeutral (clapp t n) (NNRec t (No base (clapp t VZero)) step e)
 
+vgroup :: Value -> Value
+vgroup v@(VGrp as) = v
+vgroup (VNeutral VG n) = VGrp [(False,n)]
+vgroup z = error $ "vgroup: " ++ show z ++ " ?!?"
+
 vgunit :: Value
 vgunit = VGrp []
 
+unvgrp :: Value -> [(Bool, GGenerator)]
+unvgrp v = case vgroup v of
+  (VGrp as) -> as
+
+
 vginv :: Value -> Value
-vginv (VGrp gs) = VGrp $ reverse $ (map (\ (inv, v) -> (not inv, v)) gs)
-vginv (VNeutral VG n) = VGrp [(True, VNeutral VG n)]
-vginv x         = error $ "vginv applied to non-group element " ++ show x
+vginv v = VGrp $ reverse $ map (not *** id) (unvgrp v)
 
 vgmult :: Value -> Value -> Value
-vgmult (VGrp gs) (VGrp hs) = VGrp (gs ++ hs)
-vgmult (VGrp gs) (VNeutral VG n) = VGrp (gs ++ [(False, VNeutral VG n)])
-vgmult (VNeutral VG n) (VGrp hs) = VGrp ([(False, VNeutral VG n)] ++ hs)
-vgmult (VNeutral VG n) (VNeutral VG n') = VGrp [(False, VNeutral VG n), (False, VNeutral VG n')]
-vgmult s t = error $ "vgmult applied to " ++ show s ++ " and " ++ show t
+vgmult v v' = VGrp $ unvgrp v ++ unvgrp v'
 
 vvar :: Type -> Int -> Value
 vvar a i = VNeutral a (NVar i)
@@ -185,6 +200,7 @@ quote i VNat v = case v of
   VSucc n      -> Succ (quote i VNat n)
   VNeutral _ e -> Inf $ quoteNeutral i e
   x            -> error $ show x
+quote i VUnit v = Ast
 quote i VTy v = case v of
   VTy -> Ty
   (VPi a b) -> let x = vvar a i in
@@ -192,14 +208,12 @@ quote i VTy v = case v of
   (VSg a b) -> let x = vvar a i in
     Sg (quote i VTy a) (quote (i + 1) VTy (clapp b x))
   VNat -> Nat
+  VUnit -> Unit
   VG -> G
   VNeutral _ e -> Inf $ quoteNeutral i e
   z -> error $ "unexpected " ++ show z
 quote i (VNeutral _ _) (VNeutral _ e) = Inf $ quoteNeutral i e
-quote i VG v = case v of
-  VGrp as -> quoteGroup $ map (\ (inv, v) -> (inv, quote i VG v)) as
-  VNeutral _ e -> Inf $ quoteNeutral i e
-  z -> error $ "unexpected " ++ show z
+quote i VG v = quoteGroup $ map (id *** quoteNeutral i) (unvgrp v)
 
 quoteNeutral :: Int -> Neutral -> Syn
 quoteNeutral i (NVar x) = Var (i - (x + 1)) -- convert from levels to indices
@@ -216,17 +230,15 @@ quoteNeutral i (NNRec t (No base tb) step e) =
          (quote (i + 2) (clapp t (VSucc x)) (clapp2 step x y))
          (quoteNeutral i e)
 
-quoteGroup :: [(Bool, Chk)] -> Chk
+quoteGroup :: [(Bool, Syn)] -> Chk
 quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian; is it this easy?
     where
       -- slide elements from right to left, and cancel if we look at two inverses
-      cancel :: Bwd (Bool, Chk) -> [(Bool,Chk)] -> [Chk]
+      cancel :: Bwd (Bool, Syn) -> [(Bool,Syn)] -> [Chk]
       cancel gz [] = mapzs invert gz
         where
-          invert (True, x) = GInv x
-          invert (False, x) = x
+          invert (b, x) = (if b then GInv else id) (Inf x)
       cancel B0 (g:gs) = cancel (B0 :< g) gs
-      cancel gz ((_,GUnit):gs) = cancel gz gs -- don't think this can happen, but just in case
       cancel (gz :< g) (g':gs) = if inverse g g' then cancel gz gs else cancel (gz :< g :< g') gs
         where inverse (ig, eg) (ih, eh) = ig == not ih && eg == eh
 
@@ -307,6 +319,9 @@ check i gamma ty (Sg a b) = case ty of
     let x = vvar a' i
     isType (i + 1) ((x,a'):gamma) b
   z   -> error $ "expected Ty, got " ++ show z
+check i gamma ty G = case ty of
+  VTy -> pure ()
+  z   -> error $ "expected Ty, got " ++ show z
 check i gamma ty Nat = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
@@ -325,16 +340,35 @@ check i gamma ty Zero = case ty of
   VNat -> pure ()
   z   -> error $ "expected Nat, got " ++ show z
 check i gamma ty (Succ s) = case ty of
-  VNat -> do
-    check i gamma VNat s
+  VNat -> check i gamma VNat s
   z   -> error $ "expected Nat, got " ++ show z
+check i gamma ty GUnit = case ty of
+  VG -> pure ()
+  z   -> error $ "expected G, got " ++ show z
+check i gamma ty (GInv s) = case ty of
+  VG -> check i gamma VG s
+  z   -> error $ "expected G, got " ++ show z
+check i gamma ty (s :*: t) = case ty of
+  VG -> do
+    check i gamma VG s
+    check i gamma VG t
+  z   -> error $ "expected G, got " ++ show z
+{-
+check i gamma ty t =
+  error $ "check: untreated type " ++ show ty ++ " and term " ++ show t
+-}
 
 isType :: Int -> Context -> Chk -> Maybe ()
 isType i gamma t = check i gamma VTy t
 
+-- tests
+
+f = (Lam $ Lam $ body) ::: Pi G (Pi G G) where
+    body = x :*: x :*: x :*: y :*: GInv (y :*: y :*: x)
+    x = Inf $ Var 0
+    y = Inf $ Var 1
 
 {-
--- tests
 
 plus = Lam (Lam $ Inf $ NatRec Nat (Inf $ Var 0) (Succ $ Inf $ Var 0) (Var 1))
        :::

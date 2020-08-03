@@ -64,10 +64,11 @@ data Chk = Inf Syn  -- embedding inferable
          | Lam Chk
          -- sigma
          | Pair Chk Chk
-         -- naturals
+         -- lists
          | Nil
          | Single Chk
          | Chk :++: Chk
+         | Map Chk Syn -- chk: body of function, syn: list
          -- unit element
          | Ast
          -- group elements
@@ -86,8 +87,15 @@ type Env = [Value]
 
 data Closure = Cl Chk Env
              | ClId
-             | ClComp Closure Closure
+             | ClComp Closure Closure -- neither ClId, left arg not ClComp
   deriving Show
+
+clComp :: Closure -> Closure -> Closure
+clComp ClId cl' = cl'
+clComp cl ClId = cl
+-- clComp (ClComp cl cl') cl'' = clComp cl (clComp cl' cl'')
+clComp cl cl' = ClComp cl cl'
+
 
 data Closure3 = Cl3 Chk Env -- closure with three free variables
               | ClComp3 Closure3 Closure Closure Closure
@@ -107,10 +115,10 @@ data Value = VNeutral Type Neutral -- type is not list
            | VLam Closure
            -- sigma
            | VPair Value Value
-           -- nats
+           -- lists
            | VNil
            | VCons Value Value
-           | VAppend Neutral Value
+           | VAppend (Closure, Neutral) Value -- closure: function being mapped over elements
            -- unit element
            | VAst
            -- group elements
@@ -158,6 +166,7 @@ evalChk (Pair s t) rho = VPair (evalChk s rho) (evalChk t rho)
 evalChk Nil rho = VNil
 evalChk (Single s) rho = VCons (evalChk s rho) VNil
 evalChk (s :++: t) rho = vappend (evalChk s rho) (evalChk t rho)
+evalChk (Map body e) rho = vmap (Cl body rho) (evalSyn e rho)
 evalChk Ast rho = VAst
 -- Group
 evalChk GUnit rho = vgunit
@@ -165,9 +174,9 @@ evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
-clapp (Cl s rho)      = evalChk s . (:rho)
-clapp ClId            = id
-clapp (ClComp cl cl') = clapp cl . clapp cl'
+clapp (Cl s rho) v      = evalChk s (v:rho)
+clapp ClId v            = v
+clapp (ClComp cl cl') v = clapp cl (clapp cl' v)
 
 clapp3 :: Closure3 -> Value -> Value -> Value -> Value
 clapp3 (Cl3 s rho) a b c = evalChk s (c:b:a:rho)
@@ -175,7 +184,7 @@ clapp3 (ClComp3 f a b c) x y z = clapp3 f (clapp a x) (clapp b y) (clapp c z)
 
 vneutral :: Type -> Neutral -> Value
 vneutral VUnit n = VAst
-vneutral (VList a) n = VAppend n VNil
+vneutral (VList a) n = VAppend (ClId, n) VNil
 vneutral VG n = VGrp [(False, n)]
 vneutral ty n = VNeutral ty n
 
@@ -198,15 +207,22 @@ vlistrec :: Closure -> Value -> Closure3 -> Value -> Value
 -- vlistrec t base step v | trace ("\n===listrec===\nt: " ++ show t ++ "\nbase: " ++ show base ++ "\nstep: " ++ show step ++ "\nv: " ++ show v ++ "\n=============\n") False = undefined
 vlistrec t base step VNil = base
 vlistrec t base step (VCons x xs) = clapp3 step x xs (vlistrec t base step xs)
-vlistrec t base step (VAppend xs ys) = vneutral (clapp t (VAppend xs ys)) (NLRec (ClComp t appCl) (vlistrec t base step ys) (ClComp3 step ClId appCl ClId) xs)
+vlistrec t base step v@(VAppend (cl, xs) ys) =
+  vneutral (clapp t v) (NLRec (clComp t appCl) (vlistrec t base step ys)
+                              (ClComp3 step cl appCl ClId) xs)
   where appCl = Cl (Inf (Var 0) :++: Inf (Var 1)) [ys]
 -- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
 
 vappend :: Value -> Value -> Value
 vappend VNil ys = ys
 vappend (VCons x xs) ys = VCons x (vappend xs ys)
-vappend (VAppend xs zs) ys = VAppend xs (vappend zs ys)
+vappend (VAppend clxs zs) ys = VAppend clxs (vappend zs ys)
 vappend xs ys = error $ "vappend applied to " ++ show xs
+
+vmap :: Closure -> Value -> Value
+vmap cl VNil = VNil
+vmap cl (VCons x xs) = VCons (clapp cl x) (vmap cl xs)
+vmap cl (VAppend (ncl, n) v) = VAppend (clComp cl ncl, n) (vmap cl v)
 
 vgroup :: Value -> Value
 vgroup v@(VGrp as) = v
@@ -229,6 +245,11 @@ vgmult v v' = VGrp $ unvgrp v ++ unvgrp v'
 vvar :: Type -> Int -> Value
 vvar a i = vneutral a (NVar i a)
 
+equalType :: Int -> Type -> Type -> Maybe (Value -> Value -> Bool)
+equalType i a b = case quote i VTy a == quote i VTy b of
+  False -> Nothing
+  True -> Just (\ x y -> quote i a x == quote i b y)
+
 quote :: Int -> Type -> Value -> Chk
 -- quote i ty v | trace ("quote ty: " ++ show ty ++ " v: " ++ show v) False = undefined
 quote i (VPi a b) f = let x = vvar a i in
@@ -246,9 +267,9 @@ quote i VTy v = case v of
   VList a -> List (quote i VTy a)
   VUnit -> Unit
   VG -> G
-  VNeutral _ e -> Inf $ quoteNeutral i e
+  VNeutral _ e -> Inf (quoteNeutral i e)
   z -> error $ "unexpected " ++ show z
-quote i (VNeutral _ _) (VNeutral _ e) = Inf $ quoteNeutral i e
+quote i (VNeutral _ _) (VNeutral _ e) = Inf (quoteNeutral i e)
 quote i VG v = quoteGroup $ map (id *** quoteNeutral i) (unvgrp v)
 
 quoteNeutralTy :: Int -> Neutral -> (Syn, Type)
@@ -280,16 +301,25 @@ quoteNeutralTy i (NLRec t base step e) = case quoteNeutralTy i e of
 quoteNeutral :: Int -> Neutral -> Syn
 quoteNeutral i = fst . quoteNeutralTy i
 
-quoteList :: Int -> Type -> Value -> Chk
+quoteList :: Int -> {- Element -} Type -> Value -> Chk
 quoteList i ty VNil = Nil
 quoteList i ty (VCons x xs) = Single (quote i ty x) +++ quoteList i ty xs
-quoteList i ty (VAppend ns ys) = Inf (quoteNeutral i ns) +++ quoteList i ty ys
+quoteList i b (VAppend (f, ns) ys) = case quoteNeutralTy i ns of
+  (xs, VList a) -> let
+      rest = quoteList i b ys
+      x = vvar a i
+      fx = clapp f x
+      xisfx = case equalType (i + 1) a b of
+            Nothing -> False
+            Just eq -> eq x fx
+      in
+        if xisfx then Inf xs +++ rest
+        else Map (quote (i + 1) b fx) xs +++ rest
 -- no case for VNeutral, because of our invariant
 quoteList i ty x = error $ "quoteList applied to " ++ show x
 
-
 quoteGroup :: [(Bool, Syn)] -> Chk
-quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian; is it this easy?
+quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian
     where
       -- slide elements from right to left, and cancel if we look at two inverses
       cancel :: Bwd (Bool, Syn) -> [(Bool,Syn)] -> [Chk]
@@ -360,8 +390,9 @@ synth i gamma (ListRec t base step e) = do
 check :: Int -> Context -> Type -> Chk -> Maybe ()
 check i gamma ty (Inf e) = do
   ty' <- synth i gamma e
-  if quote i VTy ty == quote i VTy ty' then pure ()
-  else error $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
+  case equalType i ty ty' of
+    Just _ -> pure ()
+    Nothing -> error $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
 check i gamma ty Ty = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
@@ -397,7 +428,7 @@ check i gamma ty (Pair s t) = case ty of
   VSg a b -> do
     check i gamma a s
     let s' = evalChk s (ctxtToEnv gamma)
-    check i ((s', a):gamma) (clapp b s') t
+    check i gamma (clapp b s') t
   z   -> error $ "expected Sg, got " ++ show z
 check i gamma ty Ast = case ty of
   VUnit -> pure ()
@@ -412,6 +443,13 @@ check i gamma ty (s :++: t) = case ty of
   VList a -> do
     check i gamma (VList a) s
     check i gamma (VList a) t
+  z   -> error $ "expected List, got " ++ show z
+check i gamma ty (Map s e) = case ty of
+  VList b -> case synth i gamma e of
+      Just (VList a) -> do
+        let x = vvar a i
+        check (i + 1) ((x, a):gamma) b s
+      z -> error $ "expected List, got " ++ show z
   z   -> error $ "expected List, got " ++ show z
 check i gamma ty GUnit = case ty of
   VG -> pure ()
@@ -455,6 +493,22 @@ two = ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: zero)) :$: Inf ((suc ::: s
 
 two' = Lam (Inf $ ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: Inf (Var 0))) :$: Inf ((suc ::: sucTy) :$: zero))
 
+two'' = Map (Inf $ Var 0) two
+
+mapswap = Lam $ Map (Pair (Inf $ Snd $ Var 0) (Inf $ Fst $ Var 0)) (Var 0)
+
+mapswapTy = Pi (List (Sg Unit Unit)) (List (Sg Unit Unit))
+
+mapswapTy' = Pi (List (Sg nat nat)) (List (Sg nat nat))
+
+mapswapmapswap = Lam $ Inf $ (mapswap ::: mapswapTy') :$: (Inf $ (mapswap ::: mapswapTy') :$: (Inf $ Var 0))
+
+toTuples = Lam $ Inf $ ListRec Ty Unit (Sg (Inf $ Var 2) (Inf $ Var 1)) (Var 0)
+
+toTuplesTy = Pi (List Ty) Ty
+
+allList' = Lam {-A-} $ Lam {-P-} $ Lam {-xs-} $ Inf $ (toTuples ::: toTuplesTy) :$: (Map (Inf $ Var 2 :$: (Inf $ Var 0)) (Var 0))
+
 allList = Lam {-A-} $ Lam {-P-} $ Lam {-xs-} $ Inf $
   ListRec Ty Unit (Sg (Inf $ (Var 4) :$: Inf (Var 2)) (Inf $ Var 1)) (Var 0)
 
@@ -462,6 +516,11 @@ allListTy = Pi Ty (Pi (Pi (Inf $ Var 0) Ty) (Pi (List (Inf $ Var 1)) Ty))
 
 r = Lam $ Lam $ Inf $
   (allList ::: allListTy) :$: Unit :$: (Lam Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+
+r' = Lam $ Lam $ Inf $
+  (allList' ::: allListTy) :$: Unit :$: (Lam Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+
+rTy = Pi nat (Pi nat Ty)
 
 {-
 

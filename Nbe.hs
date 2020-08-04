@@ -1,8 +1,11 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TupleSections #-}
 module Nbe where
+
+import Prelude hiding (fail)
 
 import Data.Maybe
 import Data.List
@@ -139,11 +142,6 @@ data Neutral = NVar Int Type -- deBruijn level
              | NLRec Closure Value Closure3 Neutral
   deriving Show
 
-{-
-data Cell = Cell Value Type
-  deriving Show
--}
-
 evalSyn :: Syn -> Env -> Value
 evalSyn (s ::: _) rho = evalChk s rho
 evalSyn (Var x) rho = rho !! x
@@ -151,12 +149,6 @@ evalSyn (f :$: s) rho = vapp (evalSyn f rho) (evalChk s rho)
 evalSyn (Fst e) rho = vfst (evalSyn e rho)
 evalSyn (Snd e) rho = vsnd (evalSyn e rho)
 evalSyn (ListRec t bas step n) rho = vlistrec (Cl t rho) (evalChk bas rho) (Cl3 step rho) (evalSyn n rho)
-
-{-
-vlistrecT a b c d =
-  trace ("\n=====vlistrec=====\nt: " ++ show a ++ "\nbase: " ++ show b ++ "\nstep: " ++ show c ++ "\nv: " ++ show d ++ "\n==> " ++ show t ++ "\n==============") $ t
-  where t = vlistrec a b c d
--}
 
 evalChk :: Chk -> Env -> Value
 evalChk (Inf e) rho = evalSyn e rho
@@ -179,32 +171,32 @@ evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
-clapp (Cl (Sco s) rho) v      = evalChk s (v:rho)
-clapp ClId v            = v
-clapp (ClComp cl cl') v = clapp cl (clapp cl' v)
+clapp (Cl (Sco s) rho) v = evalChk s (v:rho)
+clapp ClId             v = v
+clapp (ClComp cl cl')  v = clapp cl (clapp cl' v)
 
 clapp3 :: Closure3 -> Value -> Value -> Value -> Value
 clapp3 (Cl3 (Sco (Sco (Sco s))) rho) a b c = evalChk s (c:b:a:rho)
 clapp3 (ClComp3 f a b c) x y z = clapp3 f (clapp a x) (clapp b y) (clapp c z)
 
 vneutral :: Type -> Neutral -> Value
-vneutral VUnit n = VAst
+vneutral VUnit     n = VAst
 vneutral (VList a) n = VAppend (ClId, n) VNil
-vneutral VG n = VGrp [(False, n)]
-vneutral ty n = VNeutral ty n
+vneutral VG        n = VGrp [(False, n)]
+vneutral ty        n = VNeutral ty n
 
 vapp :: Value -> Value -> Value
-vapp (VLam cl) t = clapp cl t
+vapp (VLam cl)              t = clapp cl t
 vapp (VNeutral (VPi a b) n) t = vneutral (clapp b t) (NApp n a)
 vapp s t = error $ "vapp of " ++ show s
 
 vfst :: Value -> Value
-vfst (VPair a b) = a
+vfst (VPair a b)            = a
 vfst (VNeutral (VSg a b) n) = vneutral a (NFst n)
 vfst x           = error $ "vfst applied to non-pair " ++ show x
 
 vsnd :: Value -> Value
-vsnd (VPair a b) = b
+vsnd (VPair a b)              = b
 vsnd p@(VNeutral (VSg a b) n) = vneutral (clapp b (vfst p)) (NSnd n)
 vsnd x           = error $ "vsnd applied to non-pair " ++ show x
 
@@ -219,18 +211,18 @@ vlistrec t base step v@(VAppend (cl, xs) ys) =
 -- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
 
 vappend :: Value -> Value -> Value
-vappend VNil ys = ys
-vappend (VCons x xs) ys = VCons x (vappend xs ys)
+vappend VNil              ys = ys
+vappend (VCons x xs)      ys = VCons x (vappend xs ys)
 vappend (VAppend clxs zs) ys = VAppend clxs (vappend zs ys)
 vappend xs ys = error $ "vappend applied to " ++ show xs
 
 vmap :: Closure -> Value -> Value
-vmap cl VNil = VNil
-vmap cl (VCons x xs) = VCons (clapp cl x) (vmap cl xs)
+vmap cl VNil                 = VNil
+vmap cl (VCons x xs)         = VCons (clapp cl x) (vmap cl xs)
 vmap cl (VAppend (ncl, n) v) = VAppend (clComp cl ncl, n) (vmap cl v)
 
 vgroup :: Value -> Value
-vgroup v@(VGrp as) = v
+vgroup v@(VGrp as)     = v
 vgroup (VNeutral VG n) = VGrp [(False,n)]
 vgroup z = error $ "vgroup: " ++ show z ++ " ?!?"
 
@@ -248,14 +240,14 @@ vgmult :: Value -> Value -> Value
 vgmult v v' = VGrp $ unvgrp v ++ unvgrp v'
 
 vvar :: Type -> Int -> Value
-vvar a i = vneutral a (NVar i a)
+vvar a i = vneutral a $ NVar i a
 
 equalType :: Int -> Type -> Type -> Maybe (Value -> Value -> Bool)
 equalType i a b = case quote VTy a i == quote VTy b i of
   False -> Nothing
   True -> Just (\ x y -> quote a x i == quote b y i)
 
-qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> Sco x
+qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> (Sco x)
 qunder ty body op i = Sco $ op x (clapp body x) (i + 1)
   where x = vvar ty i
 
@@ -345,35 +337,47 @@ quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it 
 norm :: Env -> Type -> Chk -> Chk
 norm rho ty t = quote ty (evalChk t rho) (length rho)
 
+normSyntax :: Chk -> Chk -> Chk
+normSyntax t ty = norm [] (evalChk ty []) t
+
 type Context = [(Value,Type)]
 
 newtype TC m x = TC {tc :: Int -> Context -> m x}
+
 instance Monad m => Monad (TC m) where
   return x = TC $ \ _ _ -> return x
   TC a >>= k = TC $ \ i g -> do
     x <- a i g
     tc (k x) i g
+
 instance Applicative m => Applicative (TC m) where
   pure x = TC $ \ _ _ -> pure x
   TC f <*> TC a = TC $ \ i g -> f i g <*> a i g
+
 instance Functor m => Functor (TC m) where
   fmap f (TC k) = TC $ \ i g -> fmap f (k i g)
+
+instance MonadFail m => MonadFail (TC m) where
+  fail s = TC $ \ _ _ -> fail s
 
 under :: Type -> Sco x -> (Value -> x -> TC m r) -> TC m r
 under ty (Sco body) op = TC $ \ i g ->
   let v = vvar ty i
   in  tc (op v body) (i + 1) ((v, ty): g)
 
-type Get = TC Maybe
+type Get = TC (Either String)
+
+instance MonadFail (Either String) where
+  fail = Left
 
 typeof :: Int -> Get Type
 typeof i = TC $ \ _ g -> pure $ snd $ g !! i
 
-envy :: (Env -> t) -> Get t
-envy f = TC $ \ _ g -> return (f (map fst g))
+withEnv :: (Env -> t) -> Get t
+withEnv f = TC $ \ _ g -> return (f (ctxtToEnv g))
 
 cloSco :: Sco Chk -> Get Closure
-cloSco s = envy $ Cl s
+cloSco s = withEnv $ Cl s
 
 ctxtToEnv :: Context -> Env
 ctxtToEnv = map fst
@@ -381,7 +385,7 @@ ctxtToEnv = map fst
 synth :: Syn -> Get Type
 synth (s ::: t) = do
   isType t
-  t' <- envy $ evalChk t
+  t' <- withEnv $ evalChk t
   check t' s
   pure t'
 synth (Var x) = typeof x
@@ -390,21 +394,21 @@ synth (f :$: s) = do
   case t of
     VPi a b -> do
       check a s
-      clapp b <$> (envy $ evalChk s)
-    y -> error $ "expected Pi, got " ++ show y
+      clapp b <$> (withEnv $ evalChk s)
+    y -> fail $ "expected Pi, got " ++ show y
 synth (Fst s) = do
   t <- synth s
   case t of
     VSg a b -> pure a
-    y -> error $ "expected Sg, got " ++ show y
+    y -> fail $ "expected Sg, got " ++ show y
 synth (Snd s) = do
   t <- synth s
   case t of
-    VSg a b -> clapp b <$> (envy $ evalSyn (Fst s))
-    y -> error $ "expected Sg, got " ++ show y
+    VSg a b -> clapp b <$> (withEnv $ evalSyn (Fst s))
+    y -> fail $ "expected Sg, got " ++ show y
 synth (ListRec p base step e) = do
   te <- synth e
-  e <- envy (evalSyn e)
+  e <- withEnv (evalSyn e)
   case te of
     VList a -> do
       under te p $ \ x p -> isType p
@@ -415,12 +419,12 @@ synth (ListRec p base step e) = do
           under (mo xs) step $ \ xsh step ->
             check (mo (VCons x xs)) step
       pure $ mo e
-    z    -> error $ "expected List, got " ++ show z
+    z    -> fail $ "expected List, got " ++ show z
 
 eqTy :: Type -> Type -> Get ()
 eqTy ty ty' = TC $ \ i _ -> case equalType i ty ty' of
     Just _ -> pure ()
-    Nothing -> error $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
+    Nothing -> fail $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
 
 check :: Type -> Chk -> Get ()
 check ty (Inf e) = do
@@ -428,67 +432,67 @@ check ty (Inf e) = do
   eqTy ty' ty
 check ty Ty = case ty of
   VTy -> pure ()
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty (Pi a b) = case ty of
   VTy -> do
     isType a
-    a <- envy $ evalChk a
+    a <- withEnv $ evalChk a
     under a b $ \ x b -> isType b
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty (Sg a b) = case ty of
   VTy -> do
     isType a
-    a <- envy $ evalChk a
+    a <- withEnv $ evalChk a
     under a b $ \ x b -> isType b
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty Unit = case ty of
   VTy -> pure ()
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty G = case ty of
   VTy -> pure ()
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty (List a) = case ty of
   VTy -> pure ()
-  z   -> error $ "expected Ty, got " ++ show z
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty (Lam s) = case ty of
   VPi a b -> under a s $ \ x s -> check (clapp b x) s
-  z   -> error $ "expected Pi, got " ++ show z
+  z   -> fail $ "expected Pi, got " ++ show z
 check ty (Pair s t) = case ty of
   VSg a b -> do
     check a s
-    s <- envy $ evalChk s
+    s <- withEnv $ evalChk s
     check (clapp b s) t
-  z   -> error $ "expected Sg, got " ++ show z
+  z   -> fail $ "expected Sg, got " ++ show z
 check ty Ast = case ty of
   VUnit -> pure ()
-  z   -> error $ "expected Unit, got " ++ show z
+  z   -> fail $ "expected Unit, got " ++ show z
 check ty Nil = case ty of
   VList a -> pure ()
-  z   -> error $ "expected List, got " ++ show z
+  z   -> fail $ "expected List, got " ++ show z
 check ty (Single s) = case ty of
   VList a -> check a s
-  z   -> error $ "expected List, got " ++ show z
+  z   -> fail $ "expected List, got " ++ show z
 check ty (s :++: t) = case ty of
   VList a -> do
     check (VList a) s
     check (VList a) t
-  z   -> error $ "expected List, got " ++ show z
+  z   -> fail $ "expected List, got " ++ show z
 check ty (Map s e) = case ty of
   VList b -> synth e >>= \ z -> case z of
     VList a -> under a s $ \ x s -> check b s
-    z -> error $ "expected List, got " ++ show z
-  z   -> error $ "expected List, got " ++ show z
+    z -> fail $ "expected List, got " ++ show z
+  z   -> fail $ "expected List, got " ++ show z
 check ty GUnit = case ty of
   VG -> pure ()
-  z   -> error $ "expected G, got " ++ show z
+  z   -> fail $ "expected G, got " ++ show z
 check ty (GInv s) = case ty of
   VG -> check VG s
-  z   -> error $ "expected G, got " ++ show z
+  z   -> fail $ "expected G, got " ++ show z
 check ty (s :*: t) = case ty of
   VG -> do
     check VG s
     check VG t
-  z   -> error $ "expected G, got " ++ show z
+  z   -> fail $ "expected G, got " ++ show z
 {-
 check i gamma ty t =
   error $ "check: untreated type " ++ show ty ++ " and term " ++ show t

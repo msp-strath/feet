@@ -343,135 +343,160 @@ norm rho t ty = quote (length rho) ty (evalChk t rho)
 
 type Context = [(Value,Type)]
 
-typeof :: Int -> Context -> Maybe Type
-typeof i gamma = pure $ snd $ gamma !! i
+newtype TC m x = TC {tc :: Int -> Context -> m x}
+instance Monad m => Monad (TC m) where
+  return x = TC $ \ _ _ -> return x
+  TC a >>= k = TC $ \ i g -> do
+    x <- a i g
+    tc (k x) i g
+instance Applicative m => Applicative (TC m) where
+  pure x = TC $ \ _ _ -> pure x
+  TC f <*> TC a = TC $ \ i g -> f i g <*> a i g
+instance Functor m => Functor (TC m) where
+  fmap f (TC k) = TC $ \ i g -> fmap f (k i g)
+
+under :: Type -> Sco x -> (Value -> x -> TC m r) -> TC m r
+under ty (Sco body) op = TC $ \ i g ->
+  let v = vvar ty i
+  in  tc (op v body) (i + 1) ((v, ty): g)
+
+type Get = TC Maybe
+
+typeof :: Int -> Get Type
+typeof i = TC $ \ _ g -> pure $ snd $ g !! i
+
+envy :: (Env -> t) -> Get t
+envy f = TC $ \ _ g -> return (f (map fst g))
+
+cloSco :: Sco Chk -> Get Closure
+cloSco s = envy $ Cl s
 
 ctxtToEnv :: Context -> Env
 ctxtToEnv = map fst
 
-synth :: Int -> Context -> Syn -> Maybe Type
-synth i gamma (s ::: t) = do
-  isType i gamma t
-  let t' = evalChk t (ctxtToEnv gamma)
-  check i gamma t' s
+synth :: Syn -> Get Type
+synth (s ::: t) = do
+  isType t
+  t' <- envy $ evalChk t
+  check t' s
   pure t'
-synth i gamma (Var x) = typeof x gamma
-synth i gamma (f :$: s) = do
-  t <- synth i gamma f
+synth (Var x) = typeof x
+synth (f :$: s) = do
+  t <- synth f
   case t of
     VPi a b -> do
-      check i gamma a s
-      pure (clapp b (evalChk s (ctxtToEnv gamma)))
+      check a s
+      clapp b <$> (envy $ evalChk s)
     y -> error $ "expected Pi, got " ++ show y
-synth i gamma (Fst s) = do
-  t <- synth i gamma s
+synth (Fst s) = do
+  t <- synth s
   case t of
     VSg a b -> pure a
     y -> error $ "expected Sg, got " ++ show y
-synth i gamma (Snd s) = do
-  t <- synth i gamma s
+synth (Snd s) = do
+  t <- synth s
   case t of
-    VSg a b -> pure $ clapp b (evalSyn (Fst s) (ctxtToEnv gamma))
+    VSg a b -> clapp b <$> (envy $ evalSyn (Fst s))
     y -> error $ "expected Sg, got " ++ show y
-synth i gamma (ListRec (Sco t) base (Sco (Sco (Sco step))) e) = do
-  te <- synth i gamma e
+synth (ListRec p base step e) = do
+  te <- synth e
+  e <- envy (evalSyn e)
   case te of
     VList a -> do
-      let xs = vvar (VList a) i
-      let rho = ctxtToEnv gamma
-      isType (i+1) ((xs,VList a):gamma) t
-      check i gamma (evalChk t (VNil:rho)) base
-      let y   = vvar a i
-      let ys  = vvar (VList a) (i + 1)
-      let tys = evalChk t (ys:rho)
-      let ysh = vvar tys (i + 2)
-      let tyys = evalChk t (VCons y ys:rho)
-      check (i + 3) ((ysh, tys):(ys, VList a):(y,a):gamma) tyys step
-      pure $ evalChk t ((evalSyn e rho):rho)
+      under te p $ \ x p -> isType p
+      mo <- clapp <$> cloSco p
+      check (mo VNil) base
+      under a step $ \ x step ->
+        under te step $ \ xs step ->
+          under (mo xs) step $ \ xsh step ->
+            check (mo (VCons x xs)) step
+      pure $ mo e
     z    -> error $ "expected List, got " ++ show z
 
-check :: Int -> Context -> Type -> Chk -> Maybe ()
-check i gamma ty (Inf e) = do
-  ty' <- synth i gamma e
-  case equalType i ty ty' of
+eqTy :: Type -> Type -> Get ()
+eqTy ty ty' = TC $ \ i _ -> case equalType i ty ty' of
     Just _ -> pure ()
     Nothing -> error $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
-check i gamma ty Ty = case ty of
+
+check :: Type -> Chk -> Get ()
+check ty (Inf e) = do
+  ty' <- synth e
+  eqTy ty' ty
+check ty Ty = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Pi a (Sco b)) = case ty of
+check ty (Pi a b) = case ty of
   VTy -> do
-    isType i gamma a
-    let a' = evalChk a (ctxtToEnv gamma)
-    let x = vvar a' i
-    isType (i + 1) ((x,a'):gamma) b
+    isType a
+    a <- envy $ evalChk a
+    under a b $ \ x b -> isType b
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Sg a (Sco b)) = case ty of
+check ty (Sg a b) = case ty of
   VTy -> do
-    isType i gamma a
-    let a' = evalChk a (ctxtToEnv gamma)
-    let x = vvar a' i
-    isType (i + 1) ((x,a'):gamma) b
+    isType a
+    a <- envy $ evalChk a
+    under a b $ \ x b -> isType b
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty Unit = case ty of
+check ty Unit = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty G = case ty of
+check ty G = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (List a) = case ty of
+check ty (List a) = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Lam (Sco s)) = case ty of
-  VPi a b -> do
-    let x = vvar a i
-    check (i+1) ((x,a):gamma) (clapp b x) s
+check ty (Lam s) = case ty of
+  VPi a b -> under a s $ \ x s -> check (clapp b x) s
   z   -> error $ "expected Pi, got " ++ show z
-check i gamma ty (Pair s t) = case ty of
+check ty (Pair s t) = case ty of
   VSg a b -> do
-    check i gamma a s
-    let s' = evalChk s (ctxtToEnv gamma)
-    check i gamma (clapp b s') t
+    check a s
+    s <- envy $ evalChk s
+    check (clapp b s) t
   z   -> error $ "expected Sg, got " ++ show z
-check i gamma ty Ast = case ty of
+check ty Ast = case ty of
   VUnit -> pure ()
   z   -> error $ "expected Unit, got " ++ show z
-check i gamma ty Nil = case ty of
+check ty Nil = case ty of
   VList a -> pure ()
   z   -> error $ "expected List, got " ++ show z
-check i gamma ty (Single s) = case ty of
-  VList a -> check i gamma a s
+check ty (Single s) = case ty of
+  VList a -> check a s
   z   -> error $ "expected List, got " ++ show z
-check i gamma ty (s :++: t) = case ty of
+check ty (s :++: t) = case ty of
   VList a -> do
-    check i gamma (VList a) s
-    check i gamma (VList a) t
+    check (VList a) s
+    check (VList a) t
   z   -> error $ "expected List, got " ++ show z
-check i gamma ty (Map (Sco s) e) = case ty of
-  VList b -> case synth i gamma e of
-      Just (VList a) -> do
-        let x = vvar a i
-        check (i + 1) ((x, a):gamma) b s
-      z -> error $ "expected List, got " ++ show z
+check ty (Map s e) = case ty of
+  VList b -> synth e >>= \ z -> case z of
+    VList a -> under a s $ \ x s -> check b s
+    z -> error $ "expected List, got " ++ show z
   z   -> error $ "expected List, got " ++ show z
-check i gamma ty GUnit = case ty of
+check ty GUnit = case ty of
   VG -> pure ()
   z   -> error $ "expected G, got " ++ show z
-check i gamma ty (GInv s) = case ty of
-  VG -> check i gamma VG s
+check ty (GInv s) = case ty of
+  VG -> check VG s
   z   -> error $ "expected G, got " ++ show z
-check i gamma ty (s :*: t) = case ty of
+check ty (s :*: t) = case ty of
   VG -> do
-    check i gamma VG s
-    check i gamma VG t
+    check VG s
+    check VG t
   z   -> error $ "expected G, got " ++ show z
 {-
 check i gamma ty t =
   error $ "check: untreated type " ++ show ty ++ " and term " ++ show t
 -}
 
-isType :: Int -> Context -> Chk -> Maybe ()
-isType i gamma t = check i gamma VTy t
+isType :: Chk -> Get ()
+isType = check VTy
+
+
+topl :: TC m x -> m x
+topl op = tc op 0 []
+
 
 -- tests
 

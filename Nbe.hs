@@ -1,11 +1,13 @@
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE TupleSections #-}
 module Nbe where
 
 import Data.Maybe
 import Data.List
 import Control.Arrow ((***))
+import Control.Monad.Fail
 
 import Debug.Trace
 
@@ -249,77 +251,79 @@ vvar :: Type -> Int -> Value
 vvar a i = vneutral a (NVar i a)
 
 equalType :: Int -> Type -> Type -> Maybe (Value -> Value -> Bool)
-equalType i a b = case quote i VTy a == quote i VTy b of
+equalType i a b = case quote VTy a i == quote VTy b i of
   False -> Nothing
-  True -> Just (\ x y -> quote i a x == quote i b y)
+  True -> Just (\ x y -> quote a x i == quote b y i)
 
-quote :: Int -> Type -> Value -> Chk
+qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> Sco x
+qunder ty body op i = Sco $ op x (clapp body x) (i + 1)
+  where x = vvar ty i
+
+qunder3 :: Closure3 -> Type -> (Value -> (Type, Value -> (Type, Value -> Value -> Int -> x))) ->
+           Int -> Sco (Sco (Sco x))
+qunder3 body3 ty0 op0 i = Sco . Sco . Sco $ op2 z (clapp3 body3 x y z) (i + 3) where
+  x = vvar ty0 i
+  (ty1, op1) = op0 x
+  y = vvar ty1 (i + 1)
+  (ty2, op2) = op1 y
+  z = vvar ty2 (i + 2)
+
+quote :: Type -> Value -> Int -> Chk
 -- quote i ty v | trace ("quote ty: " ++ show ty ++ " v: " ++ show v) False = undefined
-quote i (VPi a b) f = let x = vvar a i in
-  Lam (Sco (quote (i + 1) (clapp b x) (vapp f x)))
-quote i (VSg a b) p = let p1 = vfst p; p2 = vsnd p in
-  Pair (quote i a p1) (quote i (clapp b p1) p2)
-quote i (VList a) v = quoteList i a v
-quote i VUnit v = Ast
-quote i VTy v = case v of
-  VTy -> Ty
-  (VPi a b) -> let x = vvar a i in
-    Pi (quote i VTy a) (Sco (quote (i + 1) VTy (clapp b x)))
-  (VSg a b) -> let x = vvar a i in
-    Sg (quote i VTy a) (Sco (quote (i + 1) VTy (clapp b x)))
-  VList a -> List (quote i VTy a)
-  VUnit -> Unit
-  VG -> G
-  VNeutral _ e -> Inf (quoteNeutral i e)
+quote (VPi a b) f = (Lam <$>) $ qunder a b $ \ x b -> quote b (vapp f x)
+quote (VSg a b) p = let p1 = vfst p; p2 = vsnd p in
+  Pair <$> quote a p1 <*> quote (clapp b p1) p2
+quote (VList a) v = quoteList a v
+quote VUnit v = pure Ast
+quote VTy v = case v of
+  VTy -> pure Ty
+  (VPi a b) -> Pi <$> quote VTy a <*> qunder a b (\ x b -> quote VTy b)
+  (VSg a b) -> Sg <$> quote VTy a <*> qunder a b (\ x b -> quote VTy b)
+  VList a -> List <$> quote VTy a
+  VUnit -> pure Unit
+  VG -> pure  G
+  VNeutral _ e -> Inf <$> quoteNeutral e
   z -> error $ "unexpected " ++ show z
-quote i (VNeutral _ _) (VNeutral _ e) = Inf (quoteNeutral i e)
-quote i VG v = quoteGroup $ map (id *** quoteNeutral i) (unvgrp v)
+quote (VNeutral _ _) (VNeutral _ e) = Inf <$> quoteNeutral e
+quote VG v = quoteGroup <$> traverse (\ (b, n) -> (b,) <$> quoteNeutral n) (unvgrp v)
 
-quoteNeutralTy :: Int -> Neutral -> (Syn, Type)
-quoteNeutralTy i (NVar x ty) = (Var (i - (x + 1)), ty) -- convert from levels to indices
-quoteNeutralTy i (NApp f a) = case quoteNeutralTy i f of
- (f', VPi s t) -> (f' :$: quote i s a, clapp t a)
- x  -> error $ "quoteNeutralTy: app of " ++ show x
-quoteNeutralTy i (NFst e) = case quoteNeutralTy i e of
-  (e', VSg s t) -> (Fst e', s)
-  x -> error $ "quoteNeutralTy: fst of " ++ show x
-quoteNeutralTy i (NSnd e) = case quoteNeutralTy i e of
-  (e', VSg s t) -> (Snd e', clapp t (vfst (vneutral (VSg s t) e)))
-  x -> error $ "quoteNeutralTy: snd of " ++ show x
-quoteNeutralTy i (NLRec t base step e) = case quoteNeutralTy i e of
-  (e', VList a) ->
-    let
-      xs = vvar (VList a) i
-      txs = clapp t xs
-      y = vvar a i
-      ys = vvar (VList a) (i + 1)
-      ysh = vvar (clapp t ys) (i + 2)
-    in
-      (ListRec (Sco (quote (i + 1) VTy txs))
-               (quote i (clapp t VNil) base)
-               (Sco (Sco (Sco (quote (i + 3) (clapp t (VCons y ys)) (clapp3 step y ys ysh)))))
-               e', clapp t (vneutral (VList a) e))
-  x -> error $ "quoteNeutralTy: listrec of " ++ show x
+quoteNeutralTy :: Neutral -> Int -> (Syn, Type)
+quoteNeutralTy (NVar x ty) = \ i -> (Var (i - (x + 1)), ty) -- convert from levels to indices
+quoteNeutralTy (NApp f a) = do
+  (f', VPi s t) <- quoteNeutralTy f
+  (, clapp t a) <$> ((f' :$:) <$> quote s a)
+quoteNeutralTy (NFst e) = do
+  (e', VSg s t) <- quoteNeutralTy e
+  return (Fst e', s)
+quoteNeutralTy (NSnd e) = do
+  (e', VSg s t) <- quoteNeutralTy e
+  return (Snd e', clapp t (vfst (vneutral (VSg s t) e)))
+quoteNeutralTy (NLRec t base step e) = do
+  (e', VList a) <- quoteNeutralTy e
+  ((, clapp t (vneutral (VList a) e)) <$>) $ ListRec
+    <$> qunder (VList a) t (\ x t -> quote VTy t)
+    <*> quote (clapp t VNil) base
+    <*> (qunder3 step a $ \ x -> (VList a,) $ \ xs -> (clapp t xs,) $ \ _ step ->
+         quote (clapp t (VCons x xs)) step)
+    <*> pure e'
 
-quoteNeutral :: Int -> Neutral -> Syn
-quoteNeutral i = fst . quoteNeutralTy i
+quoteNeutral :: Neutral -> Int -> Syn
+quoteNeutral n = fst <$> quoteNeutralTy n
 
-quoteList :: Int -> {- Element -} Type -> Value -> Chk
-quoteList i ty VNil = Nil
-quoteList i ty (VCons x xs) = Single (quote i ty x) +++ quoteList i ty xs
-quoteList i b (VAppend (f, ns) ys) = case quoteNeutralTy i ns of
-  (xs, VList a) -> let
-      rest = quoteList i b ys
-      x = vvar a i
-      fx = clapp f x
-      xisfx = case equalType (i + 1) a b of
-            Nothing -> False
-            Just eq -> eq x fx
-      in
-        if xisfx then Inf xs +++ rest
-        else Map (Sco $ quote (i + 1) b fx) xs +++ rest
+quoteList :: {- Element -} Type -> Value -> Int -> Chk
+quoteList ty VNil = pure Nil
+quoteList ty (VCons x xs) = (+++) <$> (Single <$> quote ty x) <*> quoteList ty xs
+quoteList b (VAppend (f, ns) ys) = do
+  (xs, VList a) <- quoteNeutralTy ns
+  a' <- quote VTy a
+  b' <- quote VTy b
+  rest <- quoteList b ys
+  Sco (x', t') <- qunder a f $ \ x t -> (,) <$> quote a x <*> quote b t
+  if a' == b' && x' == t'
+    then return $ Inf xs +++ rest
+    else return $ Map (Sco t') xs +++ rest
 -- no case for VNeutral, because of our invariant
-quoteList i ty x = error $ "quoteList applied to " ++ show x
+quoteList ty x = error $ "quoteList applied to " ++ show x
 
 quoteGroup :: [(Bool, Syn)] -> Chk
 quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian
@@ -338,8 +342,8 @@ quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it 
       mult GUnit y = y
       mult x y     = x :*: y
 
-norm :: Env -> Chk -> Type -> Chk
-norm rho t ty = quote (length rho) ty (evalChk t rho)
+norm :: Env -> Type -> Chk -> Chk
+norm rho ty t = quote ty (evalChk t rho) (length rho)
 
 type Context = [(Value,Type)]
 
@@ -590,3 +594,7 @@ g = Inf ((Lam (GUnit :*: GInv (Inf $ Var 0)) ::: Pi G G) :$: GInv (v 0)) :*: GIn
 test = norm [a 0] g VG
 
 -}
+
+instance MonadFail ((->) a) where
+  fail = error
+  

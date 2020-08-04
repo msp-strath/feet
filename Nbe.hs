@@ -40,6 +40,9 @@ mapzs f xz = mapzss f xz []
 
 infixl :$:
 
+newtype Sco x = Sco {sco :: x} deriving (Ord, Eq)
+instance Show x => Show (Sco x) where show (Sco x) = '\\' : show x
+
 data Syn = Chk ::: Chk -- type annotation
          | Var Int     -- deBruijn index
          -- application
@@ -48,27 +51,27 @@ data Syn = Chk ::: Chk -- type annotation
          | Fst Syn
          | Snd Syn
          -- naturals
-         | ListRec Chk Chk Chk Syn
+         | ListRec (Sco Chk) Chk (Sco (Sco (Sco Chk))) Syn
          -- group
   deriving (Show, Eq, Ord)
 
 data Chk = Inf Syn  -- embedding inferable
          -- types
          | Ty
-         | Pi Chk Chk
-         | Sg Chk Chk
+         | Pi Chk (Sco Chk)
+         | Sg Chk (Sco Chk)
          | List Chk
          | Unit
          | G  -- group
          -- functions
-         | Lam Chk
+         | Lam (Sco Chk)
          -- sigma
          | Pair Chk Chk
          -- lists
          | Nil
          | Single Chk
          | Chk :++: Chk
-         | Map Chk Syn -- chk: body of function, syn: list
+         | Map (Sco Chk) Syn -- chk: body of function, syn: list
          -- unit element
          | Ast
          -- group elements
@@ -85,7 +88,7 @@ xs  +++ ys = xs :++: ys
 
 type Env = [Value]
 
-data Closure = Cl Chk Env
+data Closure = Cl (Sco Chk) Env
              | ClId
              | ClComp Closure Closure -- neither ClId, left arg not ClComp
   deriving Show
@@ -97,7 +100,7 @@ clComp cl ClId = cl
 clComp cl cl' = ClComp cl cl'
 
 
-data Closure3 = Cl3 Chk Env -- closure with three free variables
+data Closure3 = Cl3 (Sco (Sco (Sco Chk))) Env -- closure with three free variables
               | ClComp3 Closure3 Closure Closure Closure
   deriving Show
 
@@ -174,12 +177,12 @@ evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
-clapp (Cl s rho) v      = evalChk s (v:rho)
+clapp (Cl (Sco s) rho) v      = evalChk s (v:rho)
 clapp ClId v            = v
 clapp (ClComp cl cl') v = clapp cl (clapp cl' v)
 
 clapp3 :: Closure3 -> Value -> Value -> Value -> Value
-clapp3 (Cl3 s rho) a b c = evalChk s (c:b:a:rho)
+clapp3 (Cl3 (Sco (Sco (Sco s))) rho) a b c = evalChk s (c:b:a:rho)
 clapp3 (ClComp3 f a b c) x y z = clapp3 f (clapp a x) (clapp b y) (clapp c z)
 
 vneutral :: Type -> Neutral -> Value
@@ -210,7 +213,7 @@ vlistrec t base step (VCons x xs) = clapp3 step x xs (vlistrec t base step xs)
 vlistrec t base step v@(VAppend (cl, xs) ys) =
   vneutral (clapp t v) (NLRec (clComp t appCl) (vlistrec t base step ys)
                               (ClComp3 step cl appCl ClId) xs)
-  where appCl = Cl (Inf (Var 0) :++: Inf (Var 1)) [ys]
+  where appCl = Cl (Sco (Inf (Var 0) :++: Inf (Var 1))) [ys]
 -- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
 
 vappend :: Value -> Value -> Value
@@ -253,7 +256,7 @@ equalType i a b = case quote i VTy a == quote i VTy b of
 quote :: Int -> Type -> Value -> Chk
 -- quote i ty v | trace ("quote ty: " ++ show ty ++ " v: " ++ show v) False = undefined
 quote i (VPi a b) f = let x = vvar a i in
-  Lam (quote (i + 1) (clapp b x) (vapp f x))
+  Lam (Sco (quote (i + 1) (clapp b x) (vapp f x)))
 quote i (VSg a b) p = let p1 = vfst p; p2 = vsnd p in
   Pair (quote i a p1) (quote i (clapp b p1) p2)
 quote i (VList a) v = quoteList i a v
@@ -261,9 +264,9 @@ quote i VUnit v = Ast
 quote i VTy v = case v of
   VTy -> Ty
   (VPi a b) -> let x = vvar a i in
-    Pi (quote i VTy a) (quote (i + 1) VTy (clapp b x))
+    Pi (quote i VTy a) (Sco (quote (i + 1) VTy (clapp b x)))
   (VSg a b) -> let x = vvar a i in
-    Sg (quote i VTy a) (quote (i + 1) VTy (clapp b x))
+    Sg (quote i VTy a) (Sco (quote (i + 1) VTy (clapp b x)))
   VList a -> List (quote i VTy a)
   VUnit -> Unit
   VG -> G
@@ -292,9 +295,9 @@ quoteNeutralTy i (NLRec t base step e) = case quoteNeutralTy i e of
       ys = vvar (VList a) (i + 1)
       ysh = vvar (clapp t ys) (i + 2)
     in
-      (ListRec (quote (i + 1) VTy txs)
+      (ListRec (Sco (quote (i + 1) VTy txs))
                (quote i (clapp t VNil) base)
-               (quote (i + 3) (clapp t (VCons y ys)) (clapp3 step y ys ysh))
+               (Sco (Sco (Sco (quote (i + 3) (clapp t (VCons y ys)) (clapp3 step y ys ysh)))))
                e', clapp t (vneutral (VList a) e))
   x -> error $ "quoteNeutralTy: listrec of " ++ show x
 
@@ -314,7 +317,7 @@ quoteList i b (VAppend (f, ns) ys) = case quoteNeutralTy i ns of
             Just eq -> eq x fx
       in
         if xisfx then Inf xs +++ rest
-        else Map (quote (i + 1) b fx) xs +++ rest
+        else Map (Sco $ quote (i + 1) b fx) xs +++ rest
 -- no case for VNeutral, because of our invariant
 quoteList i ty x = error $ "quoteList applied to " ++ show x
 
@@ -370,7 +373,7 @@ synth i gamma (Snd s) = do
   case t of
     VSg a b -> pure $ clapp b (evalSyn (Fst s) (ctxtToEnv gamma))
     y -> error $ "expected Sg, got " ++ show y
-synth i gamma (ListRec t base step e) = do
+synth i gamma (ListRec (Sco t) base (Sco (Sco (Sco step))) e) = do
   te <- synth i gamma e
   case te of
     VList a -> do
@@ -396,14 +399,14 @@ check i gamma ty (Inf e) = do
 check i gamma ty Ty = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Pi a b) = case ty of
+check i gamma ty (Pi a (Sco b)) = case ty of
   VTy -> do
     isType i gamma a
     let a' = evalChk a (ctxtToEnv gamma)
     let x = vvar a' i
     isType (i + 1) ((x,a'):gamma) b
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Sg a b) = case ty of
+check i gamma ty (Sg a (Sco b)) = case ty of
   VTy -> do
     isType i gamma a
     let a' = evalChk a (ctxtToEnv gamma)
@@ -419,7 +422,7 @@ check i gamma ty G = case ty of
 check i gamma ty (List a) = case ty of
   VTy -> pure ()
   z   -> error $ "expected Ty, got " ++ show z
-check i gamma ty (Lam s) = case ty of
+check i gamma ty (Lam (Sco s)) = case ty of
   VPi a b -> do
     let x = vvar a i
     check (i+1) ((x,a):gamma) (clapp b x) s
@@ -444,7 +447,7 @@ check i gamma ty (s :++: t) = case ty of
     check i gamma (VList a) s
     check i gamma (VList a) t
   z   -> error $ "expected List, got " ++ show z
-check i gamma ty (Map s e) = case ty of
+check i gamma ty (Map (Sco s) e) = case ty of
   VList b -> case synth i gamma e of
       Just (VList a) -> do
         let x = vvar a i
@@ -474,53 +477,75 @@ isType i gamma t = check i gamma VTy t
 
 
 
-f = (Lam $ Lam $ body) ::: Pi G (Pi G G) where
+f = (Lam . Sco $ Lam . Sco $ body) ::: (Pi G . Sco $ Pi G . Sco $ G) where
     body = x :*: x :*: x :*: y :*: GInv (y :*: y :*: x)
     x = Inf $ Var 0
     y = Inf $ Var 1
 
 nat = List Unit
 zero = Nil
-suc = Lam $ Single Ast :++: Inf (Var 0)
+suc = Lam . Sco $ Single Ast :++: Inf (Var 0)
 
-sucTy = Pi nat nat
+sucTy = Pi nat . Sco $ nat
 
-append = (Lam $ Lam $ Lam $ Inf $ ListRec (List (Inf $ Var 3)) (Inf $ Var 0) (Single (Inf $ Var 2) :++: Inf (Var 0)) (Var 1))
-         :::
-         Pi Ty (Pi (List (Inf $ Var 0)) (Pi (List (Inf $ Var 1)) (List (Inf $ Var 2))))
+append = (Lam . Sco $ Lam . Sco $ Lam . Sco $ Inf $
+  ListRec (Sco $ List (Inf $ Var 3))
+    (Inf $ Var 0)
+    (Sco . Sco . Sco $ Single (Inf $ Var 2) :++: Inf (Var 0))
+    (Var 1)
+  ) :::
+  (Pi Ty . Sco $
+   Pi (List (Inf $ Var 0)) . Sco $
+   Pi (List (Inf $ Var 1)) . Sco $
+   List (Inf $ Var 2))
 
-two = ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: zero)) :$: Inf ((suc ::: sucTy) :$: zero)
+two = append :$: Unit :$: Inf ((suc ::: sucTy) :$: zero) :$: Inf ((suc ::: sucTy) :$: zero)
 
-two' = Lam (Inf $ ((append :$: Unit) :$: Inf ((suc ::: sucTy) :$: Inf (Var 0))) :$: Inf ((suc ::: sucTy) :$: zero))
+two' = Lam . Sco $ Inf $
+  append
+  :$: Unit
+  :$: Inf ((suc ::: sucTy) :$: Inf (Var 0))
+  :$: Inf ((suc ::: sucTy) :$: zero)
 
-two'' = Map (Inf $ Var 0) two
+two'' = Map (Sco $ Inf $ Var 0) two
 
-mapswap = Lam $ Map (Pair (Inf $ Snd $ Var 0) (Inf $ Fst $ Var 0)) (Var 0)
+mapswap = Lam . Sco $ Map (Sco $ Pair (Inf $ Snd $ Var 0) (Inf $ Fst $ Var 0)) (Var 0)
 
-mapswapTy = Pi (List (Sg Unit Unit)) (List (Sg Unit Unit))
+mapswapTy = Pi (List (Sg Unit . Sco $ Unit)) . Sco $ (List (Sg Unit . Sco $ Unit))
 
-mapswapTy' = Pi (List (Sg nat nat)) (List (Sg nat nat))
+mapswapTy' = Pi (List (Sg nat . Sco $ nat)) . Sco $ (List (Sg nat . Sco $ nat))
 
-mapswapmapswap = Lam $ Inf $ (mapswap ::: mapswapTy') :$: (Inf $ (mapswap ::: mapswapTy') :$: (Inf $ Var 0))
+mapswapmapswap = Lam . Sco $ Inf $
+  (mapswap ::: mapswapTy') :$: (Inf $ (mapswap ::: mapswapTy') :$: (Inf $ Var 0))
 
-toTuples = Lam $ Inf $ ListRec Ty Unit (Sg (Inf $ Var 2) (Inf $ Var 1)) (Var 0)
+toTuples = Lam . Sco $ Inf $
+  ListRec (Sco Ty) Unit (Sco . Sco . Sco $ Sg (Inf $ Var 2) . Sco $ (Inf $ Var 1)) (Var 0)
 
-toTuplesTy = Pi (List Ty) Ty
+toTuplesTy = Pi (List Ty) . Sco $ Ty
 
-allList' = Lam {-A-} $ Lam {-P-} $ Lam {-xs-} $ Inf $ (toTuples ::: toTuplesTy) :$: (Map (Inf $ Var 2 :$: (Inf $ Var 0)) (Var 0))
+allList' = Lam . Sco{-A-} $ Lam . Sco{-P-} $ Lam . Sco{-xs-} $ Inf $
+  (toTuples ::: toTuplesTy) :$: (Map (Sco . Inf $ Var 2 :$: (Inf $ Var 0)) (Var 0))
 
-allList = Lam {-A-} $ Lam {-P-} $ Lam {-xs-} $ Inf $
-  ListRec Ty Unit (Sg (Inf $ (Var 4) :$: Inf (Var 2)) (Inf $ Var 1)) (Var 0)
+allList = Lam . Sco{-A-} $ Lam . Sco{-P-} $ Lam . Sco{-xs-} $ Inf $
+  ListRec
+    (Sco Ty)
+    Unit
+    (Sco . Sco . Sco $ Sg (Inf $ (Var 4) :$: Inf (Var 2)) . Sco $ (Inf $ Var 1))
+    (Var 0)
 
-allListTy = Pi Ty (Pi (Pi (Inf $ Var 0) Ty) (Pi (List (Inf $ Var 1)) Ty))
+allListTy =
+  Pi Ty . Sco $
+  Pi (Pi (Inf $ Var 0) . Sco $ Ty) . Sco $
+  Pi (List (Inf $ Var 1)) . Sco $
+  Ty
 
-r = Lam $ Lam $ Inf $
-  (allList ::: allListTy) :$: Unit :$: (Lam Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+r = Lam . Sco $ Lam . Sco $ Inf $
+  (allList ::: allListTy) :$: Unit :$: (Lam . Sco $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
 
-r' = Lam $ Lam $ Inf $
-  (allList' ::: allListTy) :$: Unit :$: (Lam Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+r' = Lam . Sco $ Lam . Sco $ Inf $
+  (allList' ::: allListTy) :$: Unit :$: (Lam . Sco $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
 
-rTy = Pi nat (Pi nat Ty)
+rTy = Pi nat (Sco (Pi nat (Sco Ty)))
 
 {-
 

@@ -45,8 +45,9 @@ mapzs f xz = mapzss f xz []
 
 infixl :$:
 
-newtype Sco x = Sco {sco :: x} deriving (Ord, Eq)
-instance Show x => Show (Sco x) where show (Sco x) = '\\' : show x
+newtype Abs x = Abs {unAbs :: x} deriving (Ord, Eq)
+
+instance Show x => Show (Abs x) where show (Abs x) = '\\' : show x
 
 data Syn = Chk ::: Chk -- type annotation
          | Var Int     -- deBruijn index
@@ -56,27 +57,27 @@ data Syn = Chk ::: Chk -- type annotation
          | Fst Syn
          | Snd Syn
          -- naturals
-         | ListRec (Sco Chk) Chk (Sco (Sco (Sco Chk))) Syn
+         | ListRec (Abs Chk) Chk (Abs (Abs (Abs Chk))) Syn
          -- group
   deriving (Show, Eq, Ord)
 
 data Chk = Inf Syn  -- embedding inferable
          -- types
          | Ty
-         | Pi Chk (Sco Chk)
-         | Sg Chk (Sco Chk)
+         | Pi Chk (Abs Chk)
+         | Sg Chk (Abs Chk)
          | List Chk
          | Unit
          | G  -- group
          -- functions
-         | Lam (Sco Chk)
+         | Lam (Abs Chk)
          -- sigma
          | Pair Chk Chk
          -- lists
          | Nil
          | Single Chk
          | Chk :++: Chk
-         | Map (Sco Chk) Syn -- chk: body of function, syn: list
+         | Map (Abs Chk) Syn -- chk: body of function, syn: list
          -- unit element
          | Ast
          -- group elements
@@ -93,7 +94,7 @@ xs  +++ ys = xs :++: ys
 
 type Env = [Value]
 
-data Closure = Cl (Sco Chk) Env
+data Closure = Cl (Abs Chk) Env
              | ClId
              | ClComp Closure Closure -- neither ClId, left arg not ClComp
   deriving Show
@@ -105,7 +106,7 @@ clComp cl ClId = cl
 clComp cl cl' = ClComp cl cl'
 
 
-data Closure3 = Cl3 (Sco (Sco (Sco Chk))) Env -- closure with three free variables
+data Closure3 = Cl3 (Abs (Abs (Abs Chk))) Env -- closure with three free variables
               | ClComp3 Closure3 Closure Closure Closure
   deriving Show
 
@@ -171,12 +172,12 @@ evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
-clapp (Cl (Sco s) rho) v = evalChk s (v:rho)
+clapp (Cl (Abs s) rho) v = evalChk s (v:rho)
 clapp ClId             v = v
 clapp (ClComp cl cl')  v = clapp cl (clapp cl' v)
 
 clapp3 :: Closure3 -> Value -> Value -> Value -> Value
-clapp3 (Cl3 (Sco (Sco (Sco s))) rho) a b c = evalChk s (c:b:a:rho)
+clapp3 (Cl3 (Abs (Abs (Abs s))) rho) a b c = evalChk s (c:b:a:rho)
 clapp3 (ClComp3 f a b c) x y z = clapp3 f (clapp a x) (clapp b y) (clapp c z)
 
 vneutral :: Type -> Neutral -> Value
@@ -207,7 +208,7 @@ vlistrec t base step (VCons x xs) = clapp3 step x xs (vlistrec t base step xs)
 vlistrec t base step v@(VAppend (cl, xs) ys) =
   vneutral (clapp t v) (NLRec (clComp t appCl) (vlistrec t base step ys)
                               (ClComp3 step cl appCl ClId) xs)
-  where appCl = Cl (Sco (Inf (Var 0) :++: Inf (Var 1))) [ys]
+  where appCl = Cl (Abs (Inf (Var 0) :++: Inf (Var 1))) [ys]
 -- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
 
 vappend :: Value -> Value -> Value
@@ -247,13 +248,13 @@ equalType i a b = case quote VTy a i == quote VTy b i of
   False -> Nothing
   True -> Just (\ x y -> quote a x i == quote b y i)
 
-qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> (Sco x)
-qunder ty body op i = Sco $ op x (clapp body x) (i + 1)
+qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> (Abs x)
+qunder ty body op i = Abs $ op x (clapp body x) (i + 1)
   where x = vvar ty i
 
 qunder3 :: Closure3 -> Type -> (Value -> (Type, Value -> (Type, Value -> Value -> Int -> x))) ->
-           Int -> Sco (Sco (Sco x))
-qunder3 body3 ty0 op0 i = Sco . Sco . Sco $ op2 z (clapp3 body3 x y z) (i + 3) where
+           Int -> Abs (Abs (Abs x))
+qunder3 body3 ty0 op0 i = Abs . Abs . Abs $ op2 z (clapp3 body3 x y z) (i + 3) where
   x = vvar ty0 i
   (ty1, op1) = op0 x
   y = vvar ty1 (i + 1)
@@ -310,10 +311,10 @@ quoteList b (VAppend (f, ns) ys) = do
   a' <- quote VTy a
   b' <- quote VTy b
   rest <- quoteList b ys
-  Sco (x', t') <- qunder a f $ \ x t -> (,) <$> quote a x <*> quote b t
+  Abs (x', t') <- qunder a f $ \ x t -> (,) <$> quote a x <*> quote b t
   if a' == b' && x' == t'
     then return $ Inf xs +++ rest
-    else return $ Map (Sco t') xs +++ rest
+    else return $ Map (Abs t') xs +++ rest
 -- no case for VNeutral, because of our invariant
 quoteList ty x = error $ "quoteList applied to " ++ show x
 
@@ -360,8 +361,8 @@ instance Functor m => Functor (TC m) where
 instance MonadFail m => MonadFail (TC m) where
   fail s = TC $ \ _ _ -> fail s
 
-under :: Type -> Sco x -> (Value -> x -> TC m r) -> TC m r
-under ty (Sco body) op = TC $ \ i g ->
+under :: Type -> Abs x -> (Value -> x -> TC m r) -> TC m r
+under ty (Abs body) op = TC $ \ i g ->
   let v = vvar ty i
   in  tc (op v body) (i + 1) ((v, ty): g)
 
@@ -376,8 +377,8 @@ typeof i = TC $ \ _ g -> pure $ snd $ g !! i
 withEnv :: (Env -> t) -> Get t
 withEnv f = TC $ \ _ g -> return (f (ctxtToEnv g))
 
-cloSco :: Sco Chk -> Get Closure
-cloSco s = withEnv $ Cl s
+closeAbs :: Abs Chk -> Get Closure
+closeAbs s = withEnv $ Cl s
 
 ctxtToEnv :: Context -> Env
 ctxtToEnv = map fst
@@ -412,7 +413,7 @@ synth (ListRec p base step e) = do
   case te of
     VList a -> do
       under te p $ \ x p -> isType p
-      mo <- clapp <$> cloSco p
+      mo <- clapp <$> closeAbs p
       check (mo VNil) base
       under a step $ \ x step ->
         under te step $ \ xs step ->
@@ -510,75 +511,75 @@ topl op = tc op 0 []
 
 
 
-f = (Lam . Sco $ Lam . Sco $ body) ::: (Pi G . Sco $ Pi G . Sco $ G) where
+f = (Lam . Abs $ Lam . Abs $ body) ::: (Pi G . Abs $ Pi G . Abs $ G) where
     body = x :*: x :*: x :*: y :*: GInv (y :*: y :*: x)
     x = Inf $ Var 0
     y = Inf $ Var 1
 
 nat = List Unit
 zero = Nil
-suc = Lam . Sco $ Single Ast :++: Inf (Var 0)
+suc = Lam . Abs $ Single Ast :++: Inf (Var 0)
 
-sucTy = Pi nat . Sco $ nat
+sucTy = Pi nat . Abs $ nat
 
-append = (Lam . Sco $ Lam . Sco $ Lam . Sco $ Inf $
-  ListRec (Sco $ List (Inf $ Var 3))
+append = (Lam . Abs $ Lam . Abs $ Lam . Abs $ Inf $
+  ListRec (Abs $ List (Inf $ Var 3))
     (Inf $ Var 0)
-    (Sco . Sco . Sco $ Single (Inf $ Var 2) :++: Inf (Var 0))
+    (Abs . Abs . Abs $ Single (Inf $ Var 2) :++: Inf (Var 0))
     (Var 1)
   ) :::
-  (Pi Ty . Sco $
-   Pi (List (Inf $ Var 0)) . Sco $
-   Pi (List (Inf $ Var 1)) . Sco $
+  (Pi Ty . Abs $
+   Pi (List (Inf $ Var 0)) . Abs $
+   Pi (List (Inf $ Var 1)) . Abs $
    List (Inf $ Var 2))
 
 two = append :$: Unit :$: Inf ((suc ::: sucTy) :$: zero) :$: Inf ((suc ::: sucTy) :$: zero)
 
-two' = Lam . Sco $ Inf $
+two' = Lam . Abs $ Inf $
   append
   :$: Unit
   :$: Inf ((suc ::: sucTy) :$: Inf (Var 0))
   :$: Inf ((suc ::: sucTy) :$: zero)
 
-two'' = Map (Sco $ Inf $ Var 0) two
+two'' = Map (Abs $ Inf $ Var 0) two
 
-mapswap = Lam . Sco $ Map (Sco $ Pair (Inf $ Snd $ Var 0) (Inf $ Fst $ Var 0)) (Var 0)
+mapswap = Lam . Abs $ Map (Abs $ Pair (Inf $ Snd $ Var 0) (Inf $ Fst $ Var 0)) (Var 0)
 
-mapswapTy = Pi (List (Sg Unit . Sco $ Unit)) . Sco $ (List (Sg Unit . Sco $ Unit))
+mapswapTy = Pi (List (Sg Unit . Abs $ Unit)) . Abs $ (List (Sg Unit . Abs $ Unit))
 
-mapswapTy' = Pi (List (Sg nat . Sco $ nat)) . Sco $ (List (Sg nat . Sco $ nat))
+mapswapTy' = Pi (List (Sg nat . Abs $ nat)) . Abs $ (List (Sg nat . Abs $ nat))
 
-mapswapmapswap = Lam . Sco $ Inf $
+mapswapmapswap = Lam . Abs $ Inf $
   (mapswap ::: mapswapTy') :$: (Inf $ (mapswap ::: mapswapTy') :$: (Inf $ Var 0))
 
-toTuples = Lam . Sco $ Inf $
-  ListRec (Sco Ty) Unit (Sco . Sco . Sco $ Sg (Inf $ Var 2) . Sco $ (Inf $ Var 1)) (Var 0)
+toTuples = Lam . Abs $ Inf $
+  ListRec (Abs Ty) Unit (Abs . Abs . Abs $ Sg (Inf $ Var 2) . Abs $ (Inf $ Var 1)) (Var 0)
 
-toTuplesTy = Pi (List Ty) . Sco $ Ty
+toTuplesTy = Pi (List Ty) . Abs $ Ty
 
-allList' = Lam . Sco{-A-} $ Lam . Sco{-P-} $ Lam . Sco{-xs-} $ Inf $
-  (toTuples ::: toTuplesTy) :$: (Map (Sco . Inf $ Var 2 :$: (Inf $ Var 0)) (Var 0))
+allList' = Lam . Abs{-A-} $ Lam . Abs{-P-} $ Lam . Abs{-xs-} $ Inf $
+  (toTuples ::: toTuplesTy) :$: (Map (Abs . Inf $ Var 2 :$: (Inf $ Var 0)) (Var 0))
 
-allList = Lam . Sco{-A-} $ Lam . Sco{-P-} $ Lam . Sco{-xs-} $ Inf $
+allList = Lam . Abs{-A-} $ Lam . Abs{-P-} $ Lam . Abs{-xs-} $ Inf $
   ListRec
-    (Sco Ty)
+    (Abs Ty)
     Unit
-    (Sco . Sco . Sco $ Sg (Inf $ (Var 4) :$: Inf (Var 2)) . Sco $ (Inf $ Var 1))
+    (Abs . Abs . Abs $ Sg (Inf $ (Var 4) :$: Inf (Var 2)) . Abs $ (Inf $ Var 1))
     (Var 0)
 
 allListTy =
-  Pi Ty . Sco $
-  Pi (Pi (Inf $ Var 0) . Sco $ Ty) . Sco $
-  Pi (List (Inf $ Var 1)) . Sco $
+  Pi Ty . Abs $
+  Pi (Pi (Inf $ Var 0) . Abs $ Ty) . Abs $
+  Pi (List (Inf $ Var 1)) . Abs $
   Ty
 
-r = Lam . Sco $ Lam . Sco $ Inf $
-  (allList ::: allListTy) :$: Unit :$: (Lam . Sco $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+r = Lam . Abs $ Lam . Abs $ Inf $
+  (allList ::: allListTy) :$: Unit :$: (Lam . Abs $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
 
-r' = Lam . Sco $ Lam . Sco $ Inf $
-  (allList' ::: allListTy) :$: Unit :$: (Lam . Sco $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
+r' = Lam . Abs $ Lam . Abs $ Inf $
+  (allList' ::: allListTy) :$: Unit :$: (Lam . Abs $ Ty) :$: (Inf (Var 1) :++: Inf (Var 0))
 
-rTy = Pi nat (Sco (Pi nat (Sco Ty)))
+rTy = Pi nat (Abs (Pi nat (Abs Ty)))
 
 {-
 

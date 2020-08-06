@@ -401,20 +401,6 @@ quoteThinning ty ys (VBit b) =
   pure (Bit b, if b then ys else VNil)
 quoteThinning ty ys t = error $ "quoteThinning: unexpected! ty = " ++ show ty ++ " ys = " ++ show ys ++ " t = " ++ show t
 
-
-{-
-quoteThinning a VNil VNil v = pure Ast
-quoteThinning a xs (VCons y ys) (VPair VZero v) = Pair Zero <$> quoteThinning a xs ys v
-quoteThinning a (VCons x xs) (VCons y ys) (VPair VOne v) = Pair One <$> quoteThinning a xs ys v
-quoteThinning a VNil ys _ = pure $ quoteNoThin ys -- at this point, if xs is VNil, _ must be def equal to VZero
-quoteThinning a xs ys VOne = pure $ quoteIdThin xs
-quoteThinning a xs ys (VNeutral n) = fst <$> quoteNeutralThinning n
-quoteThinning a xs ys z = error $ "quoteThinning: unexpected " ++ show z
-
-quoteNeutralThinning :: Neutral -> Int -> (Chk, (Value, Value))
-quoteNeutralThinning n = do
--}
-
 quoteNoIdThin :: Bool -> Value -> Chk
 quoteNoIdThin b VNil = Ast
 quoteNoIdThin b (VCons x xs) = Pair (Bit b) (quoteNoIdThin b xs)

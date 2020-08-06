@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE PatternSynonyms #-}
 module Nbe where
 
 import Prelude hiding (fail)
@@ -10,6 +11,8 @@ import Prelude hiding (fail)
 import Data.Maybe
 import Data.List
 import Control.Arrow ((***))
+import Control.Applicative
+import Control.Monad hiding (fail)
 import Control.Monad.Fail
 
 import Debug.Trace
@@ -56,9 +59,10 @@ data Syn = Chk ::: Chk -- type annotation
          -- projections
          | Fst Syn
          | Snd Syn
-         -- naturals
+         -- lists
          | ListRec (Abs Chk) Chk (Abs (Abs (Abs Chk))) Syn
-         -- group
+         -- booleans
+         -- TODO: BoolRec
   deriving (Show, Eq, Ord)
 
 data Chk = Inf Syn  -- embedding inferable
@@ -69,6 +73,8 @@ data Chk = Inf Syn  -- embedding inferable
          | List Chk
          | Unit
          | G  -- group
+         | Two
+         | Thinning Chk {-Elt type-} Chk {-Src list-} Chk {-Tgt list -}
          -- functions
          | Lam (Abs Chk)
          -- sigma
@@ -80,11 +86,33 @@ data Chk = Inf Syn  -- embedding inferable
          | Map (Abs Chk) Syn -- chk: body of function, syn: list
          -- unit element
          | Ast
+         -- Booleans
+         | Bit Bool
          -- group elements
          | GUnit
          | Chk :*: Chk
          | GInv Chk
+         -- thinnings
+         | ThinComp Chk Chk -- diagrammatic
   deriving (Show, Eq, Ord)
+
+pattern Cons x xs = Single x :++: xs
+
+pattern Zero = Bit False
+pattern One = Bit True
+
+consThin :: Bool -> Chk -> Chk
+consThin b Ast                  = Bit b
+consThin b t@(Bit b') | b == b' = t
+consThin b t                    = Pair (Bit b) t
+
+thinComp :: Chk -> Chk -> Chk
+thinComp One  t    = t
+thinComp t    One  = t
+thinComp Zero t    = Zero
+thinComp t    Zero = Zero
+thinComp Ast  t    = t
+thinComp s (ThinComp t u) = thinComp (thinComp s t) u
 
 (+++) :: Chk -> Chk -> Chk
 Nil +++ ys = ys
@@ -112,7 +140,7 @@ data Closure3 = Cl3 (Abs (Abs (Abs Chk))) Env -- closure with three free variabl
 
 type Type = Value
 
-data Value = VNeutral Type Neutral -- type is not list
+data Value = VNeutral Neutral -- type is not list
            -- types
            | VTy
            | VPi Type Closure
@@ -120,6 +148,8 @@ data Value = VNeutral Type Neutral -- type is not list
            | VList Type
            | VUnit
            | VG
+           | VTwo
+           | VThinning Type Value Value
            -- functions
            | VLam Closure
            -- sigma
@@ -130,9 +160,16 @@ data Value = VNeutral Type Neutral -- type is not list
            | VAppend (Closure, Neutral) Value -- closure: function being mapped over elements
            -- unit element
            | VAst
+           -- Booleans
+           | VBit Bool
            -- group elements
            | VGrp [(Bool, GGenerator)] -- Boolean: is it inverted?
+           -- thinning compositions
+           | VThinComp Value Value -- diagrammatic, at least one is stuck
   deriving Show
+
+pattern VZero = VBit False
+pattern VOne = VBit True
 
 type GGenerator = Neutral
 
@@ -159,6 +196,8 @@ evalChk (Sg a b) rho = VSg (evalChk a rho) (Cl b rho)
 evalChk (List a) rho = VList (evalChk a rho)
 evalChk Unit rho = VUnit
 evalChk G rho = VG
+evalChk Two rho = VTwo
+evalChk (Thinning a xs ys) rho = VThinning (evalChk a rho) (evalChk xs rho) (evalChk ys rho)
 evalChk (Lam s) rho = VLam (Cl s rho)
 evalChk (Pair s t) rho = VPair (evalChk s rho) (evalChk t rho)
 evalChk Nil rho = VNil
@@ -166,10 +205,13 @@ evalChk (Single s) rho = VCons (evalChk s rho) VNil
 evalChk (s :++: t) rho = vappend (evalChk s rho) (evalChk t rho)
 evalChk (Map body e) rho = vmap (Cl body rho) (evalSyn e rho)
 evalChk Ast rho = VAst
+evalChk (Bit b) rho = VBit b
 -- Group
 evalChk GUnit rho = vgunit
 evalChk (GInv s) rho = vginv (evalChk s rho)
 evalChk (s :*: t) rho = vgmult (evalChk s rho) (evalChk t rho)
+-- thinnings
+evalChk (ThinComp s t) rho = vthinComp (evalChk s rho) (evalChk t rho)
 
 clapp :: Closure -> Value -> Value
 clapp (Cl (Abs s) rho) v = evalChk s (v:rho)
@@ -184,47 +226,64 @@ vneutral :: Type -> Neutral -> Value
 vneutral VUnit     n = VAst
 vneutral (VList a) n = VAppend (ClId, n) VNil
 vneutral VG        n = VGrp [(False, n)]
-vneutral ty        n = VNeutral ty n
+vneutral ty        n = VNeutral n
 
 vapp :: Value -> Value -> Value
-vapp (VLam cl)              t = clapp cl t
-vapp (VNeutral (VPi a b) n) t = vneutral (clapp b t) (NApp n a)
+vapp (VLam cl)    t = clapp cl t
+vapp (VNeutral n) t = VNeutral (NApp n t)
 vapp s t = error $ "vapp of " ++ show s
 
 vfst :: Value -> Value
-vfst (VPair a b)            = a
-vfst (VNeutral (VSg a b) n) = vneutral a (NFst n)
-vfst x           = error $ "vfst applied to non-pair " ++ show x
+vfst (VPair a b)  = a
+vfst (VNeutral n) = VNeutral (NFst n)
+vfst x            = error $ "vfst applied to non-pair " ++ show x
 
 vsnd :: Value -> Value
-vsnd (VPair a b)              = b
-vsnd p@(VNeutral (VSg a b) n) = vneutral (clapp b (vfst p)) (NSnd n)
-vsnd x           = error $ "vsnd applied to non-pair " ++ show x
+vsnd (VPair a b)  = b
+vsnd (VNeutral n) = VNeutral (NSnd n)
+vsnd x            = error $ "vsnd applied to non-pair " ++ show x
 
 vlistrec :: Closure -> Value -> Closure3 -> Value -> Value
 -- vlistrec t base step v | trace ("\n===listrec===\nt: " ++ show t ++ "\nbase: " ++ show base ++ "\nstep: " ++ show step ++ "\nv: " ++ show v ++ "\n=============\n") False = undefined
 vlistrec t base step VNil = base
 vlistrec t base step (VCons x xs) = clapp3 step x xs (vlistrec t base step xs)
+vlistrec t base step (VNeutral n) = vlistrec t base step (VAppend (ClId, n) VNil)
 vlistrec t base step v@(VAppend (cl, xs) ys) =
-  vneutral (clapp t v) (NLRec (clComp t appCl) (vlistrec t base step ys)
+  VNeutral (NLRec (clComp t appCl) (vlistrec t base step ys)
                               (ClComp3 step cl appCl ClId) xs)
   where appCl = Cl (Abs (Inf (Var 0) :++: Inf (Var 1))) [ys]
 -- vlistrec t base step n@(VNeutral ty e) = vneutral (clapp t n) (NLRec t base step e)
+
+vcondcons :: Bool -> Value -> Value -> Value
+vcondcons True x xs = VCons x xs
+vcondcons False x xs = xs
 
 vappend :: Value -> Value -> Value
 vappend VNil              ys = ys
 vappend (VCons x xs)      ys = VCons x (vappend xs ys)
 vappend (VAppend clxs zs) ys = VAppend clxs (vappend zs ys)
+vappend (VNeutral n)      ys = VAppend (ClId, n) ys
 vappend xs ys = error $ "vappend applied to " ++ show xs
 
 vmap :: Closure -> Value -> Value
 vmap cl VNil                 = VNil
 vmap cl (VCons x xs)         = VCons (clapp cl x) (vmap cl xs)
 vmap cl (VAppend (ncl, n) v) = VAppend (clComp cl ncl, n) (vmap cl v)
+vmap cl (VNeutral n)         = VAppend (cl, n) VNil
+
+vthinComp :: Value -> Value -> Value
+vthinComp v     VOne             = v
+vthinComp VOne  v'               = v'
+vthinComp v     VZero            = VZero
+vthinComp VZero v'               = VZero
+vthinComp v     (VPair VZero v') = VPair VZero (vthinComp v v')
+vthinComp (VPair b v) (VPair VOne v') = VPair b (vthinComp v v')
+vthinComp v (VThinComp v' v'') = vthinComp (vthinComp v v') v''
+vthinComp v v' = VThinComp v v'
 
 vgroup :: Value -> Value
 vgroup v@(VGrp as)     = v
-vgroup (VNeutral VG n) = VGrp [(False,n)]
+vgroup (VNeutral n) = VGrp [(False,n)]
 vgroup z = error $ "vgroup: " ++ show z ++ " ?!?"
 
 unvgrp :: Value -> [(Bool, GGenerator)]
@@ -242,11 +301,6 @@ vgmult v v' = VGrp $ unvgrp v ++ unvgrp v'
 
 vvar :: Type -> Int -> Value
 vvar a i = vneutral a $ NVar i a
-
-equalType :: Int -> Type -> Type -> Maybe (Value -> Value -> Bool)
-equalType i a b = case quote VTy a i == quote VTy b i of
-  False -> Nothing
-  True -> Just (\ x y -> quote a x i == quote b y i)
 
 qunder :: Type -> Closure -> (Value -> Value -> Int -> x) -> Int -> (Abs x)
 qunder ty body op i = Abs $ op x (clapp body x) (i + 1)
@@ -267,18 +321,25 @@ quote (VPi a b) f = (Lam <$>) $ qunder a b $ \ x b -> quote b (vapp f x)
 quote (VSg a b) p = let p1 = vfst p; p2 = vsnd p in
   Pair <$> quote a p1 <*> quote (clapp b p1) p2
 quote (VList a) v = quoteList a v
+quote (VThinning a xs ys) v = fst <$> quoteThinning a ys v
 quote VUnit v = pure Ast
+quote VTwo v = case v of
+  VBit b -> pure $ Bit b
+  VNeutral e -> Inf <$> quoteNeutral e
+  z -> error $ "unexpected " ++ show z
 quote VTy v = case v of
   VTy -> pure Ty
   (VPi a b) -> Pi <$> quote VTy a <*> qunder a b (\ x b -> quote VTy b)
   (VSg a b) -> Sg <$> quote VTy a <*> qunder a b (\ x b -> quote VTy b)
   VList a -> List <$> quote VTy a
+  VThinning a xs ys -> Thinning <$> quote VTy a <*> quote (VList a) xs <*> quote (VList a) ys
   VUnit -> pure Unit
+  VTwo -> pure Two
   VG -> pure  G
-  VNeutral _ e -> Inf <$> quoteNeutral e
+  VNeutral e -> Inf <$> quoteNeutral e
   z -> error $ "unexpected " ++ show z
-quote (VNeutral _ _) (VNeutral _ e) = Inf <$> quoteNeutral e
-quote VG v = quoteGroup <$> traverse (\ (b, n) -> (b,) <$> quoteNeutral n) (unvgrp v)
+quote (VNeutral _) (VNeutral e) = Inf <$> quoteNeutral e
+quote VG v = normaliseGroup <$> traverse (\ (b, n) -> (b,) <$> quoteNeutral n) (unvgrp v)
 
 quoteNeutralTy :: Neutral -> Int -> (Syn, Type)
 quoteNeutralTy (NVar x ty) = \ i -> (Var (i - (x + 1)), ty) -- convert from levels to indices
@@ -315,11 +376,55 @@ quoteList b (VAppend (f, ns) ys) = do
   if a' == b' && x' == t'
     then return $ Inf xs +++ rest
     else return $ Map (Abs t') xs +++ rest
--- no case for VNeutral, because of our invariant
+quoteList b (VNeutral n) = quoteList b (VAppend (ClId, n) VNil)
 quoteList ty x = error $ "quoteList applied to " ++ show x
 
-quoteGroup :: [(Bool, Syn)] -> Chk
-quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian
+quoteThinning :: {- Element -} Type -> Value {- tgt list -} -> Value -> Int -> (Chk, Value {- src list -})
+quoteThinning ty ys (VThinComp s t) = do
+  (ph, xs) <- quoteThinning ty ys t
+  (th, ws) <- quoteThinning ty xs s
+  pure (thinComp th ph, ws)
+quoteThinning ty ys (VNeutral n) = do
+  (th, VThinning a xs ys) <- quoteNeutralTy n
+  (,xs) <$> case (xs, ys) of
+    (VNil, VNil) -> pure Ast
+    (VNil, ys)   -> pure Zero
+    _            -> do
+      b <-(==) <$> quote (VList a) xs <*> quote (VList a) ys
+      pure $ if b then One else Inf th
+quoteThinning ty VNil VAst = pure (Ast, VNil)
+quoteThinning ty VNil (VBit b) = pure (Ast, VNil)
+quoteThinning ty (VCons y ys) (VPair (VBit b) v) = do
+  (th, xs) <- quoteThinning ty ys v
+  pure (consThin b th, vcondcons b y xs)
+quoteThinning ty ys (VBit b) =
+  pure (Bit b, if b then ys else VNil)
+quoteThinning ty ys t = error $ "quoteThinning: unexpected! ty = " ++ show ty ++ " ys = " ++ show ys ++ " t = " ++ show t
+
+
+{-
+quoteThinning a VNil VNil v = pure Ast
+quoteThinning a xs (VCons y ys) (VPair VZero v) = Pair Zero <$> quoteThinning a xs ys v
+quoteThinning a (VCons x xs) (VCons y ys) (VPair VOne v) = Pair One <$> quoteThinning a xs ys v
+quoteThinning a VNil ys _ = pure $ quoteNoThin ys -- at this point, if xs is VNil, _ must be def equal to VZero
+quoteThinning a xs ys VOne = pure $ quoteIdThin xs
+quoteThinning a xs ys (VNeutral n) = fst <$> quoteNeutralThinning n
+quoteThinning a xs ys z = error $ "quoteThinning: unexpected " ++ show z
+
+quoteNeutralThinning :: Neutral -> Int -> (Chk, (Value, Value))
+quoteNeutralThinning n = do
+-}
+
+quoteNoIdThin :: Bool -> Value -> Chk
+quoteNoIdThin b VNil = Ast
+quoteNoIdThin b (VCons x xs) = Pair (Bit b) (quoteNoIdThin b xs)
+quoteNoIdThin b _ = Bit b
+
+quoteIdThin = quoteNoIdThin True
+quoteNoThin = quoteNoIdThin False
+
+normaliseGroup :: [(Bool, Syn)] -> Chk
+normaliseGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it Abelian
     where
       -- slide elements from right to left, and cancel if we look at two inverses
       cancel :: Bwd (Bool, Syn) -> [(Bool,Syn)] -> [Chk]
@@ -337,9 +442,6 @@ quoteGroup as = foldr mult GUnit $ cancel B0 $ sortOn snd as -- sort to make it 
 
 norm :: Env -> Type -> Chk -> Chk
 norm rho ty t = quote ty (evalChk t rho) (length rho)
-
-normSyntax :: Chk -> Chk -> Chk
-normSyntax t ty = norm [] (evalChk ty []) t
 
 type Context = [(Value,Type)]
 
@@ -361,6 +463,10 @@ instance Functor m => Functor (TC m) where
 instance MonadFail m => MonadFail (TC m) where
   fail s = TC $ \ _ _ -> fail s
 
+instance Alternative m => Alternative (TC m) where
+  empty = TC $ \ _ _ -> empty
+  TC a <|> TC b = TC $ \ i g -> a i g <|> b i g
+
 under :: Type -> Abs x -> (Value -> x -> TC m r) -> TC m r
 under ty (Abs body) op = TC $ \ i g ->
   let v = vvar ty i
@@ -370,6 +476,11 @@ type Get = TC (Either String)
 
 instance MonadFail (Either String) where
   fail = Left
+
+instance Alternative (Either String) where
+  empty = Left ""
+  Left _ <|> b = b
+  x      <|> _ = x
 
 typeof :: Int -> Get Type
 typeof i = TC $ \ _ g -> pure $ snd $ g !! i
@@ -423,11 +534,19 @@ synth (ListRec p base step e) = do
     z    -> fail $ "expected List, got " ++ show z
 
 eqTy :: Type -> Type -> Get ()
-eqTy ty ty' = TC $ \ i _ -> case equalType i ty ty' of
-    Just _ -> pure ()
-    Nothing -> fail $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
+eqTy = eqVal VTy
+ -- fail $ "expected " ++ show ty ++ "\ngot      " ++ show ty'
+
+getQuote :: Type -> Value -> Get Chk
+getQuote ty v = TC $ \ i _ -> pure $ quote ty v i
+
+eqVal :: Type -> Value -> Value -> Get ()
+eqVal ty a b = guard =<< ((==) <$> getQuote ty a <*> getQuote ty b)
 
 check :: Type -> Chk -> Get ()
+check (VThinning a xs ys) v = do
+  xs' <- checkThinning a v ys
+  eqVal (VList a) xs' xs
 check ty (Inf e) = do
   ty' <- synth e
   eqTy ty' ty
@@ -449,11 +568,21 @@ check ty (Sg a b) = case ty of
 check ty Unit = case ty of
   VTy -> pure ()
   z   -> fail $ "expected Ty, got " ++ show z
+check ty Two = case ty of
+  VTy -> pure ()
+  z   -> fail $ "expected Ty, got " ++ show z
 check ty G = case ty of
   VTy -> pure ()
   z   -> fail $ "expected Ty, got " ++ show z
 check ty (List a) = case ty of
-  VTy -> pure ()
+  VTy -> isType a
+  z   -> fail $ "expected Ty, got " ++ show z
+check ty (Thinning a xs ys) = case ty of
+  VTy -> do
+    isType a
+    a <- withEnv $ evalChk a
+    check (VList a) xs
+    check (VList a) ys
   z   -> fail $ "expected Ty, got " ++ show z
 check ty (Lam s) = case ty of
   VPi a b -> under a s $ \ x s -> check (clapp b x) s
@@ -467,6 +596,9 @@ check ty (Pair s t) = case ty of
 check ty Ast = case ty of
   VUnit -> pure ()
   z   -> fail $ "expected Unit, got " ++ show z
+check ty (Bit b) = case ty of
+  VTwo -> pure ()
+  z   -> fail $ "expected Two, got " ++ show z
 check ty Nil = case ty of
   VList a -> pure ()
   z   -> fail $ "expected List, got " ++ show z
@@ -499,6 +631,28 @@ check i gamma ty t =
   error $ "check: untreated type " ++ show ty ++ " and term " ++ show t
 -}
 
+checkThinning :: Type -> Chk -> Value -> Get Value
+checkThinning ty (Bit True) ys = pure ys
+checkThinning ty (Bit False) ys = pure VNil
+checkThinning ty Ast ys = case ys of
+  VNil -> pure VNil
+  z    -> fail $ "expected thinning of Nil, got thinning of " ++ show z
+checkThinning ty (Pair (Bit b) t) ys = case ys of
+  VCons y ys -> do
+    xs <- checkThinning ty t ys
+    pure (vcondcons b y xs)
+  z -> fail $ "expected Cons, got " ++ show z
+checkThinning ty (ThinComp th ph) ys = checkThinning ty ph ys >>= checkThinning ty th
+checkThinning ty (Inf n) ys = do
+  nty <- synth n
+  case nty of
+    VThinning ty' xs ys' -> do
+      eqTy ty' ty
+      eqVal (VList ty) ys' ys
+      pure xs
+    z -> fail $ "expected Thinning, got " ++ show z
+checkThinning ty z ys = fail $ "expected a thinning, got " ++ show z
+
 isType :: Chk -> Get ()
 isType = check VTy
 
@@ -507,14 +661,64 @@ topl :: TC m x -> m x
 topl op = tc op 0 []
 
 
+norm' :: Chk -> Chk -> Chk
+norm' ty t = norm [] (evalChk ty []) t
+
+check' :: Chk -> Chk -> Either String ()
+check' ty t = topl (check (evalChk ty []) t)
+
+synth' :: Syn -> Either String Type
+synth' t = topl (synth t)
+
+
 -- tests
 
+thin1 = Lam . Abs $ One
 
+thin2 = Lam . Abs $ Inf $ ListRec (Abs $ Thinning Unit (Single Ast :++: Inf (Var 0)) (Single Ast :++: Inf (Var 0))) (Pair One Ast) (Abs . Abs . Abs $ Pair One (Inf $ Var 0)) (Var 0)
 
-f = (Lam . Abs $ Lam . Abs $ body) ::: (Pi G . Abs $ Pi G . Abs $ G) where
+thin12Ty = Pi nat . Abs $ Thinning Unit (Single Ast :++: Inf (Var 0)) (Single Ast :++: Inf (Var 0))
+
+thin3 = ThinComp (Inf $ (thin2 ::: thin12Ty) :$: two'') (Inf $ (thin2 ::: thin12Ty) :$: two'')
+
+thin3Ty = Thinning Unit (Inf $ (suc ::: sucTy) :$: Inf two) (Inf $ (suc ::: sucTy) :$: Inf two)
+
+thinType = Lam {-xs-}. Abs . Lam {-x-}. Abs $ Thinning Two (Inf $ Var 1) ((Single $ Inf $ Var 0) :++: (Inf $ Var 1))
+
+thinTypeTy = Pi (List Two) (Abs $ Pi Two (Abs Ty))
+
+tz = Lam . Abs $ Pair Zero One
+
+tzTy = Pi (List Two) (Abs $ Thinning Two (Inf $ Var 0) (Cons Zero (Inf $ Var 0)))
+tszTy = Pi (List Two) (Abs $ Thinning Two (Cons Zero (Inf $ Var 0)) (Cons One (Cons Zero (Inf $ Var 0))))
+tsszTy = Pi (List Two) (Abs $ Thinning Two (Cons One (Cons Zero (Inf $ Var 0))) (Cons Zero (Cons One (Cons Zero (Inf $ Var 0)))))
+
+tzcomp = Lam . Abs $
+  ThinComp
+    (Inf $ (tz ::: tzTy) :$: (Inf $ Var 0))
+    (ThinComp
+      (Inf $ (tz ::: tszTy) :$: (Inf $ Var 0))
+      (Inf $ (tz ::: tsszTy) :$: (Inf $ Var 0)))
+
+tzcomp' = Lam . Abs $
+  ThinComp
+    (ThinComp
+     (Inf $ (tz ::: tzTy) :$: (Inf $ Var 0))
+     (Inf $ (tz ::: tszTy) :$: (Inf $ Var 0)))
+    (Inf $ (tz ::: tsszTy) :$: (Inf $ Var 0))
+
+tzcompTy = Pi (List Two) (Abs $ Thinning Two (Inf $ Var 0) (Cons Zero (Cons One (Cons Zero (Inf $ Var 0)))))
+
+tzcompNilTy = Thinning Two Nil (Cons Zero (Cons One (Cons Zero Nil)))
+
+tzcompNil = Inf $ (tzcomp' ::: tzcompTy) :$: Cons One Nil
+
+f = Lam . Abs $ Lam . Abs $ body where
     body = x :*: x :*: x :*: y :*: GInv (y :*: y :*: x)
     x = Inf $ Var 0
     y = Inf $ Var 1
+
+fTy = Pi G . Abs $ Pi G . Abs $ G
 
 nat = List Unit
 zero = Nil

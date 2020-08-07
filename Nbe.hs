@@ -115,6 +115,7 @@ thinComp Zero t    = Zero
 thinComp t    Zero = Zero
 thinComp Ast  t    = t
 thinComp s (ThinComp t u) = thinComp (thinComp s t) u
+thinComp s t = ThinComp s t
 
 (+++) :: Chk -> Chk -> Chk
 Nil +++ ys = ys
@@ -459,6 +460,9 @@ under :: Type -> Abs x -> (Value -> x -> TC m r) -> TC m r
 under ty (Abs body) op = TC $ \ i g ->
   let v = vvar ty i
   in  tc (op v body) (i + 1) ((v, ty): g)
+
+define :: (Value, Type) -> Abs x -> (x -> TC m r) -> TC m r
+define vt (Abs p) k = TC $ \ i g -> tc (k p) (i + 1) (vt : g)
 
 type Get = TC (Either String)
 
@@ -941,6 +945,22 @@ data Task
   | Done
   deriving Show
 
+runTask :: Task -> Get [(String, Chk)]
+runTask Done = return []
+runTask ((x, e) :& k) = do
+  t <- synth e
+  v <- withEnv $ evalSyn e
+  c <- getQuote t v
+  ((x, c) :) <$> define (v, t) k runTask
+runTask (ga :|- k) = go ga where
+  go T0 = runTask k
+  go (s :\: t) = do
+    check VTy s
+    s <- withEnv $ evalChk s
+    under s t $ \ _ -> go
+  
+  
+
 pTask :: DBP Task
 pTask = (pTel $ \ ga -> (ga :|-) <$ spc <* punc "|-" <* spc <*> pTask)
     <|> (pId >>= \ x ->
@@ -953,6 +973,11 @@ pGo :: DBP x -> String -> [x]
 pGo p s = do
   (x, "") <- dbp p [] s
   return x
+
+test :: String -> Either String [(String, Chk)]
+test x = case [t | (t, "") <- dbp pTask [] x] of
+  [t] -> topl $ runTask t
+  _ -> Left "syntax error"
 
 class Thin t where
   (<^>) :: t -> Integer -> t

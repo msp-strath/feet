@@ -1012,3 +1012,23 @@ instance Thin Syn where
   Var i <^> th = Var (i <^> th)
   (f :$: s) <^> th = (f <^> th) :$: (s <^> th)
   ListRec p n c e <^> th = ListRec (p <^> th) (n <^> th) (c <^> th) (e <^> th)
+
+
+{-
+swap = (\X \Y \p (p -. , p .-)
+       : (X Y : Ty, p : X >< Y) -> Y >< X
+       );
+mapswap =
+  (\X \Y \xys xy <- xys | swap X Y xy
+  : (X Y : Ty) -> List (X >< Y) -> List (Y >< X)
+  );
+A B : Ty, abs : List (A >< B) |-
+foo = mapswap B A (mapswap A B abs);
+
+
+Tuple = (\Xs Xs {Xs Ty; [] -> Unit; [X] ++ Xs -> X >< Xs$}
+        : List Ty -> Ty
+        );
+As Bs Cs : List Ty |-
+Foo = Tuple (([Unit] ++ As) ++ (Bs ++ [Two]) ++ ([G] ++ Cs));
+-}

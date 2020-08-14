@@ -11,19 +11,25 @@ import Data.Char
 import Feet.Syntax
 import Feet.Frontend
 
-newtype DBP x = DBP {dbp :: [String] -> String -> [(x, String)]} deriving (Semigroup, Monoid)
+newtype DBP x = DBP {dbp :: [String] -> String -> [(x, String)]}
+  deriving (Semigroup, Monoid)
 
 instance Monad DBP where
   return x = DBP $ \ is s -> return (x, s)
   DBP a >>= k = DBP $ \ is s -> do
     (a, s) <- a is s
     dbp (k a) is s
+
 instance Applicative DBP where
   pure = return
   f <*> a = f >>= \ f -> a >>= \ a -> return (f a)
+
 instance Functor DBP where
   fmap = (<*>) . pure
-instance Alternative DBP where empty = mempty ; (<|>) = (<>)
+
+instance Alternative DBP where
+  empty = mempty
+  (<|>) = (<>)
 
 push :: String -> DBP x -> DBP (Abs x)
 push i (DBP p) = DBP $ \ is s -> (Abs *** id) <$> p (i : is) s
@@ -38,46 +44,69 @@ get p = DBP $ \ is s -> case s of
   c : s | p c -> [(c, s)]
   _ -> []
 
+string :: String -> DBP String
+string = traverse (get . (==))
+
 punc :: String -> DBP ()
-punc s = () <$ traverse (get . (==)) s
+punc s = () <$ string s
 
 spc :: DBP ()
 spc = () <$ many (get isSpace)
 
+spaced :: DBP x -> DBP x
+spaced p = spc *> p <* spc
+
 pId :: DBP String
-pId = (:) <$> get isAlpha <*> many (get more) where
-  more c = isAlphaNum c || elem c "'_$"
+pId = (:) <$> get isAlpha <*> many (get $ \ c -> isAlphaNum c || elem c "'_$")
 
 pTel :: (Tel -> DBP x) -> DBP x
-pTel k = pIds >>= \ xs -> id <$ spc <* punc ":" <* spc <*> (pChk 0 >>= bind k xs)
+pTel k = do
+  xs <- pIds
+  spaced $ punc ":"
+  pChk 0 >>= bind k xs
   where
-  pIds = (:) <$> pId <*> go where go = id <$ get isSpace <* spc <*> pIds <|> pure []
-  pMore k =
-     (id <$ spc <* punc "," <* spc <*>
-        (pIds >>= \ xs -> id <$ spc <* punc ":" <* spc <*> (pChk 0 >>= bind k xs))
-      <|> k T0)
-  bind k [] s = pMore k
-  bind k (x : xs) s = unAbs <$> push x (bind (k . (s :\:) . Abs) xs (s <^> negate 2))
+    pIds = (:) <$> pId <*> (id <$ get isSpace <* spc <*> pIds <|> pure [])
+    pMore k = (do
+      spaced $ punc ","
+      xs <- pIds
+      spaced $ punc ":"
+      pChk 0 >>= bind k xs)
+      <|> k T0
+    bind k [] s = pMore k
+    bind k (x : xs) s = unAbs <$> push x (bind (k . (s :\:) . Abs) xs (s <^> negate 2))
 
 pChk :: Int -> DBP Chk
 pChk l =
   id <$ guard (l == 0) <*>
-    (     Lam <$ punc "\\" <* spc <*>
-            (pId >>= \ x -> push x (id <$ spc <*> pChk 0))
+    (     (do
+              punc "\\"
+              spc
+              x <- pId
+              spc
+              t <- push x (pChk 0)
+              return $ Lam t)
      <|>  id <$ punc "(" <* spc <*> pTel pPiSg
-     <|>  (pId >>= \ x ->
-            flip Map <$ spc <* punc "<-" <* spc <*> pSyn 0
-              <* spc <* punc "|" <* spc <*> push x (pChk 0))
+     <|>  (do
+              x <- pId
+              spaced $ punc "<-"
+              xs <- pSyn 0
+              spaced $ punc "|"
+              t <- push x (pChk 0)
+              return $ Map t xs)
     )
   <|> (pHead >>= pMore l) where
-  pHead = 
+  pHead =
     Inf <$> pSyn l
     <|> Ty <$ punc "Ty"
     <|> List <$ punc "List" <* spc <*> pChk 2
     <|> Unit <$ punc "Unit"
     <|> List Unit <$ punc "Nat"
-    <|> Two <$ punc "Two" <|> Zero <$ punc "0" <|> One <$ punc "1"
-    <|> G <$ punc "G" <|> GUnit <$ punc "@" <|> GInv <$ punc "!" <* spc <*> pHead
+    <|> Two <$ punc "Two"
+    <|> Zero <$ punc "0"
+    <|> One <$ punc "1"
+    <|> G <$ punc "G"
+    <|> GUnit <$ punc "@"
+    <|> GInv <$ punc "!" <* spc <*> pHead
     <|> id <$ punc "[" <* spc <*> pList <* spc <* punc "]"
     <|> tuple <$ punc "(" <* spc <*> pList <* spc <* punc ")"
   pMore l s =
@@ -108,9 +137,13 @@ pSyn l = pHead >>= pMore l where
 
   pHead :: DBP Syn
   pHead = Var <$> (pId >>= dbix)
-      <|> (:::) <$ punc "(" <* spc <*> (pChk 0 >>= novar)
-            <* spc <* punc ":" <* spc
-            <*> pChk 0 <* spc <* punc ")"
+      <|> do
+            punc "(" <* spc
+            s <- pChk 0 >>= novar
+            spaced $ punc ":"
+            ty <- pChk 0
+            spc *> punc ")"
+            return (s ::: ty)
 
   -- We avoid ambiguity between telescopes and radicals by disallowing
   -- radical variables (for there is never need to annotate a variable).
@@ -123,23 +156,28 @@ pSyn l = pHead >>= pMore l where
     ((id <$ guard (l < 2) <* spc <*> (
      (e :$:) <$> pChk 2
      <|>
-     mklr e <$ punc "{" <* spc
-       <*> (pId >>= \ x -> push x (id <$ spc <*> pChk 0))
-       <* spc <* punc ";" <* spc
-       <*> (id <$ punc "[" <* spc <* punc "]" <* spc <* punc "->" <* spc <*> pChk 0)
-       <* spc <* punc ";" <* spc
-       <*> (id <$ punc "[" <* spc <*> (pId >>= \ x ->
-            id <$ spc <* punc "]" <* spc <* punc "++" <* spc <*> (pId >>= \ xs ->
-             id <$ spc <* punc "->" <* spc <*>
-               push x (push xs (push (xs ++ "$") (pChk 0)))
-            )))
-        <* spc <* punc "}"
-      <|>
-      Fst e <$ punc ".-" <|> Snd e <$ punc "-."
+     (do
+         punc "{"
+         x <- spaced pId
+         t <- push x (pChk 0)
+         spaced $ punc ";"
+         punc "[" <* spc <* punc "]"
+         spaced $ punc "->"
+         b <- pChk 0
+         spaced $ punc ";"
+         punc "["
+         x <- spaced pId
+         punc "]" <* spc <* punc "++"
+         xs <- spaced pId
+         punc "->"
+         s <- spaced $ push x (push xs (push (xs ++ "$") (pChk 0)))
+         punc "}"
+         return $ ListRec t b s e
+     )
+      <|> Fst e <$ punc ".-"
+      <|> Snd e <$ punc "-."
       )) >>= pMore l)
     <|> pure e
-
-  mklr e t b s = ListRec t b s e
 
 
 pList :: DBP Chk

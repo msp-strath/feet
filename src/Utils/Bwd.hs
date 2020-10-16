@@ -31,3 +31,7 @@ mapzss f (xz :< x) xs = mapzss f xz (f x : xs)
 
 mapzs :: (a -> b) -> Bwd a -> [b]
 mapzs f xz = mapzss f xz []
+
+bwdProj :: Bwd x -> Int -> x
+bwdProj (xz :< x) 0 = x
+bwdProj (xz :< x) n = bwdProj xz (n-1)

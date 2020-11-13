@@ -2,6 +2,11 @@
             , FlexibleInstances
             , PatternSynonyms
             , TupleSections
+            , GADTs
+            , TypeOperators
+            , DeriveFunctor
+            , DeriveFoldable
+            , DeriveTraversable
 #-}
 module NewSyntax where
 
@@ -22,7 +27,7 @@ data Chk
   | B (Chk m)      -- binder
   | E (Syn m)      -- embedding Syn
   | M m            -- metas
-  deriving Show
+  deriving (Show, Functor)
 
 data Syn
   m -- what's the meta
@@ -30,7 +35,7 @@ data Syn
   | P Name Type     -- parameters
   | Syn m :$ Chk m  -- elimination
   | Chk m ::: Chk m -- radicals
-  deriving Show
+  deriving (Show, Functor)
 
 type Name = [(String, Int)] -- namespace and deBruijn level
 
@@ -58,17 +63,17 @@ newtype Env = Env [(Value, Type)]
 
 type ChkPa = Chk (String, Thinning)
 
-type ChkEx = Chk (String, Substitution)
-type SynEx = Syn (String, Substitution)
+type ChkEx = Chk Meta
+type SynEx = Syn Meta
 
-newtype Substitution = Substitution (Bwd SynEx)
+data Meta = String :/ Bwd SynEx
   deriving Show
 
 pm :: String -> ChkPa -- pattern metavariable
 pm x = M (x, mempty)
 
 em :: String -> ChkEx -- expression metavariable
-em x = M (x, Substitution B0)
+em x = M (x :/ B0)
 
 -- thinnings
 
@@ -156,6 +161,9 @@ instance Thin SynTm where
 
 -- pattern matching
 
+trail :: (Foldable t, Monoid (f a), Applicative f) => t a -> f a
+trail = foldMap pure
+
 type Matching = [(String, ChkTm)]
 
 match :: ChkPa -> ChkTm -> Maybe Matching
@@ -167,7 +175,7 @@ match (E s) _ = Nothing
 match _ _ = Nothing
 
 instantiate :: Matching -> ChkEx -> ChkTm
-instantiate m (M (x, Substitution si)) =  substitute (fmap (instantiateSyn m) si) 0 t
+instantiate m (M (x :/ si)) =  substitute (fmap (instantiateSyn m) si) 0 t
   where Just t = lookup x m
 instantiate m (A a) = A a
 instantiate m (t :& t') = (instantiate m t) :& (instantiate m t')
@@ -180,54 +188,172 @@ instantiateSyn m (P n ty) = P n ty
 instantiateSyn m (s :$ t) = instantiateSyn m s :$ instantiate m t
 instantiateSyn m (t ::: t') = instantiate m t ::: instantiate m t'
 
-substitute :: Bwd SynTm -> Int -> ChkTm -> ChkTm
-substitute si i (M m) = M m
-substitute si i (A a) = A a
-substitute si i (t :& t') = (substitute si i t :& substitute si i t')
-substitute si i (B t) = B (substitute si (i+1) t)
-substitute si i (E s) = upsE (substituteSyn si i s)
+class Substitute t where
+  substitute :: Bwd SynTm -> Int -> t -> t
 
-substituteSyn :: Bwd SynTm -> Int -> SynTm -> SynTm
-substituteSyn si i (V j) = bwdProj si' j where
-  si' = fromi i <> fmap (<^> th) si <> toi 0
-  fromi k = fromi (k+1) :< V k
-  toi k = if k >= i then B0 else  toi (k+1) :< V k
-  th = Th (shiftL (-1) j)
-substituteSyn si i (P n ty) = P n ty
-substituteSyn si i (s :$ t) = substituteSyn si i s :$ substitute si i t
-substituteSyn si i (t ::: t') = substitute si i t ::: substitute si i t'
+(//) :: Substitute t => t -> SynTm -> t
+t // e = substitute (B0 :< e) 0 t
 
-data BetaRule = BetaRule
+instance Substitute m => Substitute (Chk m) where
+  substitute si i (M m) = M m
+  substitute si i (A a) = A a
+  substitute si i (t :& t') = (substitute si i t :& substitute si i t')
+  substitute si i (B t) = B (substitute si (i+1) t)
+  substitute si i (E s) = upsE (substitute si i s)
+
+instance Substitute Void where
+  substitute si i a = a
+
+instance Substitute Meta where
+  substitute si i (m :/ ez) = m :/ fmap (substitute si i) ez
+
+instance Substitute m => Substitute (Syn m) where
+  substitute si i (V j) = vacuous (bwdProj si' j) where
+    si' = fromi i <> fmap (<^> th) si <> toi 0
+    fromi k = fromi (k+1) :< V k
+    toi k = if k >= i then B0 else  toi (k+1) :< V k
+    th = Th (shiftL (-1) j)
+  substitute si i (P n ty) = P n ty
+  substitute si i (s :$ t) = substitute si i s :$ substitute si i t
+  substitute si i (t ::: t') = substitute si i t ::: substitute si i t'
+
+data ElimRule = ElimRule
   { targetType :: ChkPa
-  , target :: ChkPa
   , eliminator :: ChkPa
-  , reduct :: ChkEx
   , reductType :: ChkEx
+  , betaRules :: [(ChkPa, ChkEx)]
   }
   deriving Show
 
-betaContract :: BetaRule -> SynTm -> Maybe SynTm
-betaContract r ((t ::: ty) :$ s) = do
+betaContract :: ElimRule -> SynTm -> Maybe SynTm
+betaContract r (e@(t ::: ty) :$ s) = do
   mtTy <- match (targetType r) ty
-  mt <- match (target r) t
   me <- match (eliminator r) s
-  let m = mtTy ++ mt ++ me
-  return (instantiate m (reduct r) ::: instantiate m (reductType r))
+  let rTy = (instantiate (me ++ mtTy) $ reductType r) // e
+  case [ (mt, rhs) | (p, rhs) <- betaRules r, mt <- trail (match p t) ] of
+    [(mt, rhs)] -> do
+      let m = mtTy ++ mt ++ me
+      return (instantiate m rhs ::: rTy)
+    _ -> Nothing
 betaContract r _ = Nothing
 
+data Setup = Setup
+  { elimRules :: [ElimRule]
+  , weakAnalyser :: (Type, ChkTm) -> Maybe WeakAnalysis -- expecting types to be head normalised,
+                                                        -- ensuring that output types are
+  }
+
+data WeakAnalysis where
+  WeakAnalysis :: Functor f => f (Type, ChkTm) -> (f ChkTm -> ChkTm) -> WeakAnalysis
+
+-- Assuming type is already head normalised
+weakChkEval :: Setup -> (Type, ChkTm) -> ChkTm
+-- weakChkEval r x | trace ("chk: " ++ show x) False = undefined
+weakChkEval r x | Just (WeakAnalysis xs recon)  <- weakAnalyser r x =
+                    recon (fmap (weakChkEval r) xs)
+weakChkEval r (ty, E e) = upsE (fst $ weakEvalSyn r e)
+weakChkEval r x = snd x
+
+-- Ensures that the type is head normalised
+weakEvalSyn :: Setup -> SynTm -> (SynTm, Type)
+-- weakEvalSyn r x | trace ("syn: " ++ show x) False = undefined
+weakEvalSyn r (V i) = error "weakEvalSyn applied to non-closed term"
+weakEvalSyn r (P n ty) = (P n ty, ty)
+weakEvalSyn r (t ::: ty) = case weakChkEval r (Ty, ty) of
+  ty -> case weakChkEval r (ty, t) of
+    t -> (t ::: ty, ty)
+weakEvalSyn r (e :$ s) = case weakEvalSyn r e of
+  (e, ty) -> case [ (mTy ++ melim, rule) | rule <- elimRules r, mTy <- trail (match (targetType rule) ty), melim <- trail (match (eliminator rule) s) ] of
+    [(m, rule)] -> let rTy = weakChkEval r (Ty, (instantiate m $ reductType rule) // e) in
+        (,rTy) $
+          case e of
+            (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
+              [(mt, rhs)] -> instantiate (m ++ mt) rhs ::: rTy
+              [] -> e :$ s
+              _  -> error "weakEvalSyn: more than one rule applies"
+            _ -> e :$ s
+    _ -> error "weakEvalSyn: not exactly one rule applies"
+
+-- Type
+pattern Ty = A "Ty"
+
+-- Pi
 pattern Pi s t = A "Pi" :& s :& B t
 pattern Lam t = A "lam" :& B t
 
-pattern Ty = A "Ty"
+-- Sigma
+pattern Sg s t = A "Sg" :& s :& B t
+pattern Fst = A "fst"
+pattern Snd = A "snd"
 
-piBeta = BetaRule
+
+piElim = ElimRule
   { targetType = Pi (pm "S") (pm "T")
-  , target = Lam (pm "t")
   , eliminator = pm "s"
-  , reduct = M ("t", si)
-  , reductType = M ("T", si)
+  , reductType = M ("T" :/ si)
+  , betaRules = [(Lam (pm "t"), M ("t" :/ si))]
   }
-  where si = Substitution $ B0 :< (em "s" ::: em "S")
+  where si = B0 :< (em "s" ::: em "S")
+
+fstElim = ElimRule
+  { targetType = Sg (pm "S") (pm "T")
+  , eliminator = Fst
+  , reductType = M ("S" :/ B0)
+  , betaRules = [(pm "s" :& pm "t", M ("s" :/ B0))]
+  }
+
+sndElim = ElimRule
+  { targetType = Sg (pm "S") (pm "T")
+  , eliminator = Snd
+  , reductType = M ("T" :/ si)
+  , betaRules = [(pm "s" :& pm "t", M ("t" :/ B0))]
+  }
+  where si = B0 :< (V 0 :$ Fst)
+
+
+
+newtype I x = I { unI :: x }
+  deriving (Functor, Foldable, Traversable)
+
+newtype K a x = K { unK :: a }
+  deriving (Functor, Foldable, Traversable)
+
+data (f :*: g) x = (:*:) { outL :: f x , outR :: g x }
+  deriving (Functor, Foldable, Traversable)
+
+data (f :+: g) x = InL (f x) | InR (g x)
+  deriving (Functor, Foldable, Traversable)
+
+
+
+ourSetup = Setup
+  { elimRules = [piElim, fstElim, sndElim]
+  , weakAnalyser = \ x -> case x of
+      (Ty, Pi s t) -> Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
+      (Ty, Sg s t) -> Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
+      (Sg s t, x :& y) -> Just $ WeakAnalysis (I (s, x) :*: I (tyNorm (t // (x ::: s)) , y)) (\ (I x' :*: I y') -> (x' :& y'))
+      _ -> Nothing
+  }
+  where
+    tyNorm t = weakChkEval ourSetup (Ty, t)
+
+
+
+
+
+
+
+
+
+
+-- testing
 
 idTy = Pi Ty (Pi (E (V 0)) (E (V 1)))
 idTm = Lam (Lam (E (V 0)))
+
+fam :: ChkTm -> ChkTm
+fam x = Sg Ty (Pi (E (V 0)) (x <^> o' (o' mempty)))
+
+famTytm = idTy :& Lam idTy
+
+

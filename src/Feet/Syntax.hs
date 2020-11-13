@@ -1,4 +1,4 @@
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PatternSynonyms, GADTs #-}
 module Feet.Syntax where
 
 import Utils.Bwd

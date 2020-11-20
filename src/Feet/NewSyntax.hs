@@ -8,6 +8,7 @@
             , DeriveFoldable
             , DeriveTraversable
             , LambdaCase
+            , TypeFamilies
 #-}
 module NewSyntax where
 
@@ -16,7 +17,7 @@ import Data.Bits
 
 import Control.Applicative
 import Control.Monad
--- import Control.Monad.Fail
+import Control.Arrow
 
 import Utils.Bwd
 
@@ -179,19 +180,63 @@ match (B t) (B t') = match t t'
 match (E s) _ = Nothing
 match _ _ = Nothing
 
-instantiate :: Matching -> ChkEx -> ChkTm
-instantiate m (M (x :/ si)) =  substitute (fmap (instantiateSyn m) si) 0 t
-  where Just t = lookup x m
-instantiate m (A a) = A a
-instantiate m (t :& t') = (instantiate m t) :& (instantiate m t')
-instantiate m (B t) = B (instantiate m t)
-instantiate m (E s) = upsE (instantiateSyn m s)
+class Instantiate a where
+  type InstTarget a
+  instantiate :: Matching -> a -> InstTarget a
 
-instantiateSyn :: Matching -> SynEx -> SynTm
-instantiateSyn m (V i) = V i
-instantiateSyn m (P n ty) = P n ty
-instantiateSyn m (s :$ t) = instantiateSyn m s :$ instantiate m t
-instantiateSyn m (t ::: t') = instantiate m t ::: instantiate m t'
+instance Instantiate Meta where
+  type InstTarget Meta = ChkTm
+
+  instantiate m (x :/ si) = substitute (instantiate m si) 0 t
+    where Just t = lookup x m
+
+instance Instantiate ChkEx where
+  type InstTarget ChkEx = ChkTm
+
+  instantiate m (M x) = instantiate m x
+  instantiate m (A a) = A a
+  instantiate m (t :& t') = (instantiate m t) :& (instantiate m t')
+  instantiate m (B t) = B (instantiate m t)
+  instantiate m (E s) = upsE (instantiate m s)
+
+instance Instantiate SynEx where
+  type InstTarget SynEx = SynTm
+
+  instantiate m (V i) = V i
+  instantiate m (P n ty) = P n ty
+  instantiate m (s :$ t) = instantiate m s :$ instantiate m t
+  instantiate m (t ::: t') = instantiate m t ::: instantiate m t'
+
+instance Instantiate ChkPa where
+  type InstTarget ChkPa = ChkTm
+
+  instantiate m (M (x, th)) = case lookup x m of
+    Nothing -> error $ "instantiate: no premise given for " ++ show x
+    Just t  -> t <^> th
+  instantiate m (A a) = A a
+  instantiate m (t :& t') = (instantiate m t :& instantiate m t')
+  instantiate m (B t) = B (instantiate m t)
+  instantiate m (E s) = error "instantiate: non-canonical pattern"
+
+instance (Instantiate a, Instantiate b) => Instantiate (Premiss a b) where
+  type InstTarget (Premiss a b) = Premiss (InstTarget a) (InstTarget b)
+
+  instantiate m (as :- x) = fmap (fmap (instantiate m)) as :- instantiate m x
+
+instance Instantiate a => Instantiate [a] where
+  type InstTarget [a] = [InstTarget a]
+
+  instantiate m = fmap (instantiate m)
+
+instance Instantiate a => Instantiate (Bwd a) where
+  type InstTarget (Bwd a) = Bwd (InstTarget a)
+
+  instantiate m = fmap (instantiate m)
+
+instance (Instantiate a, Instantiate b) => Instantiate (a, b) where
+  type InstTarget (a, b) = (InstTarget a, InstTarget b)
+
+  instantiate m = instantiate m *** instantiate m
 
 class Substitute t where
   substitute :: Bwd SynTm -> Int -> t -> t
@@ -209,6 +254,9 @@ instance Substitute m => Substitute (Chk m) where
 instance Substitute Void where
   substitute si i a = a
 
+instance (Substitute a, Substitute b) => Substitute (a, b) where
+  substitute si i (a, b) = (substitute si i a, substitute si i b)
+
 instance Substitute Meta where
   substitute si i (m :/ ez) = m :/ fmap (substitute si i) ez
 
@@ -222,9 +270,20 @@ instance Substitute m => Substitute (Syn m) where
   substitute si i (s :$ t) = substitute si i s :$ substitute si i t
   substitute si i (t ::: t') = substitute si i t ::: substitute si i t'
 
+instance (Substitute a, Substitute b) => Substitute (Premiss a b) where
+  substitute si i ([] :- x) = [] :- substitute si i x
+  substitute si i (((n,a):ps) :- x) = (((n,a'):ps') :- x') where
+    a' = substitute si i a
+    ps' :- x' = substitute si (i+1) (ps :- x)
+
+
+data Premiss a b = [(String,a)] :- (a,b) -- types of params, (name and type of s. var)
+  deriving (Show)
+
 data ElimRule = ElimRule
   { targetType :: ChkPa
   , eliminator :: ChkPa
+  , elimPremisses :: [Premiss ChkEx Meta]
   , reductType :: ChkEx
   , betaRules :: [(ChkPa, ChkEx)]
   }
@@ -245,7 +304,7 @@ betaContract r _ = Nothing
 data Setup = Setup
   { elimRules :: [ElimRule]
   , weakAnalyserSetup :: (Type, ChkTm) -> TCM (Maybe WeakAnalysis) -- expecting types to be head normalised,
-                                                        -- ensuring that output types are
+                                                                   -- ensuring that output types are
   }
 
 data WeakAnalysis where
@@ -267,18 +326,26 @@ instance Monad TCM where
 
   fail x = TCM $ \ _ _ -> Left x
 
--- instance MonadFail TCM where
+refresh :: String -> TCM x -> TCM x
+refresh y x = TCM $ \ s (root, level) -> runTCM x s (root :< (y, level), 0)
+
+fresh :: (String, Type) -> (SynTm -> TCM x) -> TCM x
+fresh (y, ty) f = TCM $ \ s (root, level) -> runTCM (f (P (root <>> [(y, level)]) ty)) s (root, level+1)
+
+vP :: Name -> Type -> TCM SynTm
+vP n ty = TCM $ \ s (root, level) -> case B0 <>< n of
+   (nz :< (_, k)) | nz == root -> return $ V (level - k - 1)
+   _                           -> return $ P n ty
 
 
 weakAnalyser :: (Type, ChkTm) -> TCM (Maybe WeakAnalysis)
 weakAnalyser x = TCM $ \ s ns -> runTCM (weakAnalyserSetup s x) s ns
 
-eliminate :: Type -> ChkTm -> TCM (Maybe (Matching, ElimRule))
+eliminate :: Type -> ChkTm -> TCM (Matching, ElimRule)
 eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimRules setup, mTy <- trail (match (targetType rule) ty), melim <- trail (match (eliminator rule) s) ] of
-  [(m, rule)] -> Right $ Just (m, rule)
-  []          -> Right $ Nothing
+  [(m, rule)] -> Right $ (m, rule)
+  []          -> Left $ "eliminator: no rule applies"
   x           -> Left $ "eliminator: more than one rule applies! " ++ show x
-
 
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
@@ -302,18 +369,71 @@ weakEvalSyn (t ::: ty) = do
         t -> return (t ::: ty, ty)
 weakEvalSyn (e :$ s) = do
   (e, ty) <- weakEvalSyn e
-  eliminate ty s >>= \case
-    Just (m, rule) -> do
-      rTy <- weakChkEval (Ty, (instantiate m $ reductType rule) // e)
-      (,rTy) <$>
-        case e of
-          (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
-            [(mt, rhs)] -> do
-               r <-  weakChkEval (rTy, instantiate (m ++ mt) rhs)
-               return (r ::: rTy)
-            [] -> return (e :$ s)
-            _  -> fail "weakEvalSyn: more than one rule applies"
-          _ -> return (e :$ s)
+  (m , rule) <- eliminate ty s
+  rTy <- weakChkEval (Ty, (instantiate m $ reductType rule) // e)
+  (,rTy) <$>
+    case e of
+      (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
+        [(mt, rhs)] -> do
+           r <-  weakChkEval (rTy, instantiate (m ++ mt) rhs)
+           return (r ::: rTy)
+        [] -> return (e :$ s)
+        _  -> fail "weakEvalSyn: more than one rule applies"
+      _ -> return (e :$ s)
+
+
+normalise :: (Type, ChkTm) -> TCM ChkTm
+normalise = refresh "n" . go where
+  go (Ty, e) = weakChkEval (Ty, e) >>= \case
+    Ty -> return Ty
+    Pi s t -> do
+      s <- go (Ty, s)
+      t <- fresh ("x", s) $ \ x -> go (Ty, t // x)
+      return (Pi s t)
+    Sg s t -> do
+      s <- go (Ty, s)
+      t <- fresh ("y", s) $ \ y -> go (Ty, t // y)
+      return (Sg s t)
+    E e -> do
+      (e, _) <- stop e
+      return (E e)
+    x -> error $ "hm " ++ show x
+  go (a@(Pi s t), e) = Lam <$> (fresh ("x", s) $ \ x -> go (t // x, E ((e ::: a) :$ E x)))
+  go (a@(Sg s t), e) = do
+    e <- weakChkEval (a, e)
+    s <- weakChkEval (Ty, s)
+    let e0 = (e ::: a) :$ Fst
+    e0' <- go (s, E e0)
+    t <- weakChkEval (Ty, t // e0)
+    let e1 = (e ::: a) :$ Snd
+    e1' <- go (t, E e1)
+    return (e0' :& e1')
+  go (E ty, E e) = do
+    (e, _) <- weakEvalSyn e
+    (e, _) <- stop e
+    return (E e)
+
+
+  stop :: SynTm -> TCM (SynTm, Type)
+  stop (V i) = error "normalise: applied to non-closed term"
+  stop (P n ty) = (,) <$> vP n ty <*> weakChkEval (Ty, ty)
+  stop (E e ::: t) = stop e
+  stop (s ::: t) = error "normalise: failure of canonicity"
+  stop (e :$ s) = do
+    (e', ty) <- stop e
+    (m, rule) <- eliminate ty s
+    let ps = elimPremisses rule
+    let names = [ n | (_ :- (_, n :/ _)) <- ps ]
+    values <- traverse prem (instantiate m ps)
+    let m' = zip names values
+    rTy <- weakChkEval (Ty, (instantiate m $ reductType rule) // e)
+    return (e' :$ instantiate m' (eliminator rule), rTy)
+
+  prem :: Premiss ChkTm ChkTm -> TCM ChkTm
+  prem ([] :- p) = go p
+  prem (((y, ty):hs) :- p) = fresh (y, ty) $ \ y -> prem ((hs :- p) // y)
+
+
 -- Type
 pattern Ty = A "Ty"
 
@@ -331,6 +451,7 @@ pattern Snd = A "snd"
 piElim = ElimRule
   { targetType = Pi (pm "S") (pm "T")
   , eliminator = pm "s"
+  , elimPremisses = [[] :- (em "S", "s" :/ B0)]
   , reductType = M ("T" :/ si)
   , betaRules = [(Lam (pm "t"), M ("t" :/ si))]
   }
@@ -339,6 +460,7 @@ piElim = ElimRule
 fstElim = ElimRule
   { targetType = Sg (pm "S") (pm "T")
   , eliminator = Fst
+  , elimPremisses = []
   , reductType = M ("S" :/ B0)
   , betaRules = [(pm "s" :& pm "t", M ("s" :/ B0))]
   }
@@ -346,11 +468,11 @@ fstElim = ElimRule
 sndElim = ElimRule
   { targetType = Sg (pm "S") (pm "T")
   , eliminator = Snd
+  , elimPremisses = []
   , reductType = M ("T" :/ si)
   , betaRules = [(pm "s" :& pm "t", M ("t" :/ B0))]
   }
   where si = B0 :< (V 0 :$ Fst)
-
 
 
 newtype I x = I { unI :: x }
@@ -394,4 +516,12 @@ fam x = Sg Ty (Pi (E (V 0)) (x <^> o' (o' mempty)))
 
 famTytm = idTy :& Lam idTy
 
+pairTy = Sg Ty Ty
 
+
+{-
+TODO
+1. More infrastructure towards canonical representatives
+2. Additional interesting types (lists, abelian group, thinnings)
+3. Typechecking
+-}

@@ -7,6 +7,7 @@
             , DeriveFunctor
             , DeriveFoldable
             , DeriveTraversable
+            , LambdaCase
 #-}
 module NewSyntax where
 
@@ -15,6 +16,7 @@ import Data.Bits
 
 import Control.Applicative
 import Control.Monad
+-- import Control.Monad.Fail
 
 import Utils.Bwd
 
@@ -37,7 +39,10 @@ data Syn
   | Chk m ::: Chk m -- radicals
   deriving (Show, Functor)
 
-type Name = [(String, Int)] -- namespace and deBruijn level
+type Name = [(String, Int)] -- namespaces and deBruijn levels
+type NameSupply = (Bwd (String, Int), Int) -- (namespaces and deBruijn levels), local deBruijn level
+
+initNameSupply = (B0, 0)
 
 infixr 2 :&
 infixl 3 :$
@@ -239,41 +244,76 @@ betaContract r _ = Nothing
 
 data Setup = Setup
   { elimRules :: [ElimRule]
-  , weakAnalyser :: (Type, ChkTm) -> Maybe WeakAnalysis -- expecting types to be head normalised,
+  , weakAnalyserSetup :: (Type, ChkTm) -> TCM (Maybe WeakAnalysis) -- expecting types to be head normalised,
                                                         -- ensuring that output types are
   }
 
 data WeakAnalysis where
-  WeakAnalysis :: Functor f => f (Type, ChkTm) -> (f ChkTm -> ChkTm) -> WeakAnalysis
+  WeakAnalysis :: (Traversable f) => f (Type, ChkTm) -> (f ChkTm -> ChkTm) -> WeakAnalysis
+
+newtype TCM a = TCM { runTCM :: Setup -> NameSupply -> Either String a }
+  deriving (Functor)
+
+instance Applicative TCM where
+  pure = return
+  (<*>) = ap
+
+instance Monad TCM where
+  return x = TCM $ \ s ns -> Right x
+
+  TCM tx >>= f = TCM $ \ s ns -> case tx s ns of
+    Left err -> Left err
+    Right x -> runTCM (f x) s ns
+
+  fail x = TCM $ \ _ _ -> Left x
+
+-- instance MonadFail TCM where
+
+
+weakAnalyser :: (Type, ChkTm) -> TCM (Maybe WeakAnalysis)
+weakAnalyser x = TCM $ \ s ns -> runTCM (weakAnalyserSetup s x) s ns
+
+eliminate :: Type -> ChkTm -> TCM (Maybe (Matching, ElimRule))
+eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimRules setup, mTy <- trail (match (targetType rule) ty), melim <- trail (match (eliminator rule) s) ] of
+  [(m, rule)] -> Right $ Just (m, rule)
+  []          -> Right $ Nothing
+  x           -> Left $ "eliminator: more than one rule applies! " ++ show x
+
 
 -- Assuming type is already head normalised
-weakChkEval :: Setup -> (Type, ChkTm) -> ChkTm
--- weakChkEval r x | trace ("chk: " ++ show x) False = undefined
-weakChkEval r x | Just (WeakAnalysis xs recon)  <- weakAnalyser r x =
-                    recon (fmap (weakChkEval r) xs)
-weakChkEval r (ty, E e) = upsE (fst $ weakEvalSyn r e)
-weakChkEval r x = snd x
+weakChkEval :: (Type, ChkTm) -> TCM ChkTm
+-- weakChkEval x | trace ("chk: " ++ show x) False = undefined
+weakChkEval x = do
+  r <- weakAnalyser x
+  case r of
+    Just (WeakAnalysis xs recon) -> recon <$> traverse weakChkEval xs
+    Nothing -> case x of
+      (ty, E e) -> upsE <$> (fst <$> weakEvalSyn e)
+      x         -> return (snd x)
 
 -- Ensures that the type is head normalised
-weakEvalSyn :: Setup -> SynTm -> (SynTm, Type)
--- weakEvalSyn r x | trace ("syn: " ++ show x) False = undefined
-weakEvalSyn r (V i) = error "weakEvalSyn applied to non-closed term"
-weakEvalSyn r (P n ty) = (P n ty, ty)
-weakEvalSyn r (t ::: ty) = case weakChkEval r (Ty, ty) of
-  ty -> case weakChkEval r (ty, t) of
-    t -> (t ::: ty, ty)
-weakEvalSyn r (e :$ s) = case weakEvalSyn r e of
-  (e, ty) -> case [ (mTy ++ melim, rule) | rule <- elimRules r, mTy <- trail (match (targetType rule) ty), melim <- trail (match (eliminator rule) s) ] of
-    [(m, rule)] -> let rTy = weakChkEval r (Ty, (instantiate m $ reductType rule) // e) in
-        (,rTy) $
-          case e of
-            (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
-              [(mt, rhs)] -> instantiate (m ++ mt) rhs ::: rTy
-              [] -> e :$ s
-              _  -> error "weakEvalSyn: more than one rule applies"
-            _ -> e :$ s
-    _ -> error "weakEvalSyn: not exactly one rule applies"
-
+weakEvalSyn :: SynTm -> TCM (SynTm, Type)
+-- weakEvalSyn x | trace ("syn: " ++ show x) False = undefined
+weakEvalSyn (V i) = fail "weakEvalSyn applied to non-closed term"
+weakEvalSyn (P n ty) = return (P n ty, ty)
+weakEvalSyn (t ::: ty) = do
+  weakChkEval (Ty, ty) >>= \case
+    ty -> weakChkEval (ty, t) >>= \case
+        t -> return (t ::: ty, ty)
+weakEvalSyn (e :$ s) = do
+  (e, ty) <- weakEvalSyn e
+  eliminate ty s >>= \case
+    Just (m, rule) -> do
+      rTy <- weakChkEval (Ty, (instantiate m $ reductType rule) // e)
+      (,rTy) <$>
+        case e of
+          (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
+            [(mt, rhs)] -> do
+               r <-  weakChkEval (rTy, instantiate (m ++ mt) rhs)
+               return (r ::: rTy)
+            [] -> return (e :$ s)
+            _  -> fail "weakEvalSyn: more than one rule applies"
+          _ -> return (e :$ s)
 -- Type
 pattern Ty = A "Ty"
 
@@ -283,6 +323,7 @@ pattern Lam t = A "lam" :& B t
 
 -- Sigma
 pattern Sg s t = A "Sg" :& s :& B t
+-- Pair s t = s :& t
 pattern Fst = A "fst"
 pattern Snd = A "snd"
 
@@ -325,26 +366,23 @@ data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
 
-
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim]
-  , weakAnalyser = \ x -> case x of
-      (Ty, Pi s t) -> Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
-      (Ty, Sg s t) -> Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
-      (Sg s t, x :& y) -> Just $ WeakAnalysis (I (s, x) :*: I (tyNorm (t // (x ::: s)) , y)) (\ (I x' :*: I y') -> (x' :& y'))
-      _ -> Nothing
+  , weakAnalyserSetup = \ x -> case x of
+      (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
+      (Ty, Sg s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
+      (Sg s t, x :& y) -> do
+        t <- weakChkEval (Ty, t // (x ::: s))
+        return $ Just $ WeakAnalysis (I (s, x) :*: I (t , y)) (\ (I x' :*: I y') -> (x' :& y'))
+      _ -> return $ Nothing
   }
-  where
-    tyNorm t = weakChkEval ourSetup (Ty, t)
 
 
+run :: TCM x -> Either String x
+run x = runTCM x ourSetup initNameSupply
 
-
-
-
-
-
-
+chkEval = run . weakChkEval
+evalSyn = run . weakEvalSyn
 
 -- testing
 

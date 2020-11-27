@@ -408,11 +408,12 @@ normalise = refresh "n" . go where
     let e1 = (e ::: a) :$ Snd
     e1' <- go (t, E e1)
     return (e0' :& e1')
+  go (One, _) = return Void
   go (List _X, e) = do
     _X <- weakChkEval (Ty, _X)
     weakChkEval (List _X, e) >>= \case
       Nil -> return Nil
-      One x -> One <$> go (_X, x)
+      Single x -> Single <$> go (_X, x)
       xs :++: ys -> do
         xs' <- go (List _X, xs)
         ys' <- go (List _X, ys)
@@ -495,12 +496,16 @@ sndElim = ElimRule
   }
   where si = B0 :< (V 0 :$ Fst)
 
+-- One
+pattern One = A "One"
+pattern Void = A ""
+
 -- List
 pattern List _X = A "List" :& _X
 pattern Nil = A ""
-pattern One x = A "one" :& x
+pattern Single x = A "single" :& x
 pattern (:++:) xs ys = A "append" :& xs :& ys
-pattern Cons x xs = One x :++: xs
+pattern Cons x xs = Single x :++: xs
 pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
 
 listElim = ElimRule
@@ -514,7 +519,7 @@ listElim = ElimRule
   , reductType = M ("P" :/ (B0 :< V 0))
   , betaRules =
     [ (Nil, em "n")
-    , (One (pm "x"),
+    , (Single (pm "x"),
        M ("c" :/ (B0
          :< (em "x" ::: em "X")
          :< (Nil ::: List (em "X"))

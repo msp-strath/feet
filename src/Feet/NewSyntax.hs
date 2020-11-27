@@ -412,7 +412,7 @@ normalise = refresh "n" . go where
     x <- weakChkEval (Ty, x)
     weakChkEval (List x, e) >>= \case
       Nil -> return Nil
-      s :& ss -> do
+      Cons s ss -> do
         s'  <- go (x, s)
         ss' <- go (List x, ss)
         return (s' :& ss')
@@ -486,7 +486,7 @@ sndElim = ElimRule
 
 -- List
 pattern List _X = A "List" :& _X
--- Cons s t = s :& t
+pattern Cons s t = s :& t
 pattern Nil = A ""
 pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
 
@@ -497,11 +497,11 @@ listElim = ElimRule
     [ [("xs", List (em "X"))] :- (Ty, "P" :/ B0)
     , [] :- (M ("P" :/ (B0 :< (Nil ::: List (em "X")))), "n" :/ B0)
     , [("x", em "X"), ("xs", List (em "X")), ("ih", M ("P" :/ (B0 :< V 0)))]
-      :- (M ("P" :/ (B0 :< ((E (V 2) :& E (V 1)) ::: List (em "X")))), "c" :/ B0)]
+      :- (M ("P" :/ (B0 :< (Cons (E (V 2)) (E (V 1)) ::: List (em "X")))), "c" :/ B0)]
   , reductType = M ("P" :/ (B0 :< V 0))
   , betaRules =
     [ (Nil, em "n")
-    , (pm "x" :& pm "xs",
+    , (Cons (pm "x") (pm "xs"),
        M ("c" :/ (B0 :< (em "x" ::: em "X") :< (em "xs" ::: List (em "X")) :<
         ((em "xs" ::: List (em "X")) :$ ListElim (em "P") (em "n") (em "c")))))
     ]
@@ -553,9 +553,9 @@ pairTy = Sg Ty Ty
 revTy = ListElim
   (Pi (List Ty) (List Ty))
   (Lam (E (V 0)))
-  (Lam (E (V 1 :$ (E (V 3) :& E (V 0)))))
+  (Lam (E (V 1 :$ Cons (E (V 3)) (E (V 0)))))
 
-myTys = (Ty :& (Pi Ty Ty :& (Sg Ty Ty :& Nil))) ::: List Ty
+myTys = Cons Ty (Cons (Pi Ty Ty) (Cons (Sg Ty Ty) Nil)) ::: List Ty
 
 {-
 TODO

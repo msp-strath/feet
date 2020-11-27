@@ -10,7 +10,7 @@
             , LambdaCase
             , TypeFamilies
 #-}
-module NewSyntax where
+module Feet.NewSyntax where
 
 import Data.Void
 import Data.Bits
@@ -408,6 +408,17 @@ normalise = refresh "n" . go where
     let e1 = (e ::: a) :$ Snd
     e1' <- go (t, E e1)
     return (e0' :& e1')
+  go (List x, e) = do
+    x <- weakChkEval (Ty, x)
+    weakChkEval (List x, e) >>= \case
+      Nil -> return Nil
+      s :& ss -> do
+        s'  <- go (x, s)
+        ss' <- go (List x, ss)
+        return (s' :& ss')
+      E e -> do
+        (e', _) <- stop e
+        return (E e')
   go (E ty, E e) = do
     (e, _) <- weakEvalSyn e
     (e, _) <- stop e
@@ -441,13 +452,6 @@ pattern Ty = A "Ty"
 pattern Pi s t = A "Pi" :& s :& B t
 pattern Lam t = A "lam" :& B t
 
--- Sigma
-pattern Sg s t = A "Sg" :& s :& B t
--- Pair s t = s :& t
-pattern Fst = A "fst"
-pattern Snd = A "snd"
-
-
 piElim = ElimRule
   { targetType = Pi (pm "S") (pm "T")
   , eliminator = pm "s"
@@ -457,12 +461,18 @@ piElim = ElimRule
   }
   where si = B0 :< (em "s" ::: em "S")
 
+-- Sigma
+pattern Sg s t = A "Sg" :& s :& B t
+-- Pair s t = s :& t
+pattern Fst = A "fst"
+pattern Snd = A "snd"
+
 fstElim = ElimRule
   { targetType = Sg (pm "S") (pm "T")
   , eliminator = Fst
   , elimPremisses = []
   , reductType = M ("S" :/ B0)
-  , betaRules = [(pm "s" :& pm "t", M ("s" :/ B0))]
+  , betaRules = [(pm "s" :& pm "t", em "s")]
   }
 
 sndElim = ElimRule
@@ -470,10 +480,32 @@ sndElim = ElimRule
   , eliminator = Snd
   , elimPremisses = []
   , reductType = M ("T" :/ si)
-  , betaRules = [(pm "s" :& pm "t", M ("t" :/ B0))]
+  , betaRules = [(pm "s" :& pm "t", em "t")]
   }
   where si = B0 :< (V 0 :$ Fst)
 
+-- List
+pattern List _X = A "List" :& _X
+-- Cons s t = s :& t
+pattern Nil = A ""
+pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
+
+listElim = ElimRule
+  { targetType = List (pm "X")
+  , eliminator = ListElim (pm "P") (pm "n") (pm "c")
+  , elimPremisses =
+    [ [("xs", List (em "X"))] :- (Ty, "P" :/ B0)
+    , [] :- (M ("P" :/ (B0 :< (Nil ::: List (em "X")))), "n" :/ B0)
+    , [("x", em "X"), ("xs", List (em "X")), ("ih", M ("P" :/ (B0 :< V 0)))]
+      :- (M ("P" :/ (B0 :< ((E (V 2) :& E (V 1)) ::: List (em "X")))), "c" :/ B0)]
+  , reductType = M ("P" :/ (B0 :< V 0))
+  , betaRules =
+    [ (Nil, em "n")
+    , (pm "x" :& pm "xs",
+       M ("c" :/ (B0 :< (em "x" ::: em "X") :< (em "xs" ::: List (em "X")) :<
+        ((em "xs" ::: List (em "X")) :$ ListElim (em "P") (em "n") (em "c")))))
+    ]
+  }
 
 newtype I x = I { unI :: x }
   deriving (Functor, Foldable, Traversable)
@@ -489,7 +521,7 @@ data (f :+: g) x = InL (f x) | InR (g x)
 
 
 ourSetup = Setup
-  { elimRules = [piElim, fstElim, sndElim]
+  { elimRules = [piElim, fstElim, sndElim, listElim]
   , weakAnalyserSetup = \ x -> case x of
       (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
       (Ty, Sg s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
@@ -518,6 +550,12 @@ famTytm = idTy :& Lam idTy
 
 pairTy = Sg Ty Ty
 
+revTy = ListElim
+  (Pi (List Ty) (List Ty))
+  (Lam (E (V 0)))
+  (Lam (E (V 1 :$ (E (V 3) :& E (V 0)))))
+
+myTys = (Ty :& (Pi Ty Ty :& (Sg Ty Ty :& Nil))) ::: List Ty
 
 {-
 TODO

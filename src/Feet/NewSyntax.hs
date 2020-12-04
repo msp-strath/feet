@@ -370,6 +370,11 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
 -- weakChkEval x | trace ("chk: " ++ show x) False = undefined
+weakChkEval (Thinning _X ga de, th) = do
+  de <- weakChkEval (List _X, de)
+  (ga', th) <- weakChkThinning th de
+  -- demandEquality (List _X) ga ga' --this should never fail
+  return (evalThinNF th de)
 weakChkEval x = do
   r <- weakAnalyser x
   case r of
@@ -377,6 +382,113 @@ weakChkEval x = do
     Nothing -> case x of
       (ty, E e) -> upsE <$> (fst <$> weakEvalSyn e)
       x         -> return (snd x)
+
+
+expandThx :: ChkTm -> ChkTm -> ChkTm
+expandThx x Nil = Nil
+expandThx x (Cons _ xs) = Cons x (expandThx x xs)
+expandThx x ys = x
+
+isExpandedThx :: ChkTm -> ChkTm -> Bool
+isExpandedThx x Nil = True
+isExpandedThx x (Cons y xs) = y == x && isExpandedThx x xs
+isExpandedThx x ys = x == ys
+
+isAnnihilatedSemi :: ChkTm -> Maybe ChkTm
+isAnnihilatedSemi (Cons Th0 th) = isAnnihilatedSemi th
+isAnnihilatedSemi (ThSemi th ph) | isExpandedThx Th0 ph = Just th
+                                 | otherwise = ThSemi th <$> isAnnihilatedSemi ph
+isAnnihilatedSemi _ = Nothing
+
+thSemi :: ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm
+thSemi Nil th ga ph de = expandThx Th0 de
+thSemi rh th ga (Cons Th0 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
+thSemi rh (Cons Th0 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
+thSemi (Cons _ rh) (Cons Th1 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th1 (thSemi rh th ga ph de)
+
+thSemi rh th ga ph de | isExpandedThx Th1 th = ph
+thSemi rh th ga ph de | isExpandedThx Th1 ph = th
+
+thSemi rh th ga ph de | Just th <- isAnnihilatedSemi th = ThSemi th (expandThx Th0 de)
+thSemi rh th Nil ph de = ThSemi th (expandThx Th0 de)
+
+
+data ThinNF = IsNone
+            | IsNonNilId
+            | NoneAfter SynTm
+            | NotViaNil ChkTm
+
+evalThinNF :: ThinNF -> ChkTm -> ChkTm
+evalThinNF IsNone de = expandThx Th0 de
+evalThinNF IsNonNilId de = expandThx Th1 de
+evalThinNF (NoneAfter th) de = go de where
+  go Nil = E th
+  go (Cons _ de) = Cons Th0 (go de)
+  go de = ThSemi (E th) Th0
+evalThinNF (NotViaNil th) = th
+
+-- de is head normal
+-- returns origin + evaled thinning
+weakChkThinning :: ChkTm -> ChkTm -> TCM (ChkTm, ThinNF)
+weakChkThinning th de = case th of
+  Th1 -> return (de, case de of Nil -> IsNone; _ -> IsNonNilId)
+  Th0 -> return (Nil, IsNone)
+  Nil -> return (Nil, IsNone)
+  Cons Th1 th -> case de of
+    Cons x xs -> do
+      (ga, th) <- weakChkThinning th xs
+      return $ (Cons x ga,) $ case (th, xs) of
+        (IsNone, Nil) -> IsNonNilId
+        (IsNonNilId, xs) -> IsNonNilId
+        _ -> NotViaNil (Cons Th1 (evalThinNF th de))
+  Cons Th0 th -> case de of
+    Cons x xs -> do
+      (ga, th) <- weakChkThinning th xs
+      return $ (ga,) $ case th of
+        IsNone -> IsNone
+        IsNonNilId -> NotViaNil (Cons Th0 (expandThx Th1 xs))
+        NoneAfter th -> NoneAfter th
+        NotViaNil th -> NotViaNil (Cons Th0 th)
+  ThSemi th ph -> do
+    (ga, ph) <- weakChkThinning ph de
+    (rh, th) <- weakChkThinning th ga
+    return $ (rh,) $ case th of
+      IsNone -> IsNone
+      IsNonNilId -> ph
+      NoneAfter th -> NoneAfter th
+      NotViaNil th -> case ph of
+        IsNone -> case th of E th -> NoneAfter th
+        IsNonNilId -> NotViaNil th
+        NoneAfter ph -> NoneAfter ()
+  E th -> do
+    (th, t) <- weakEvalSyn th
+    case t of
+      Thinning _X ga de' -> do
+        -- demandEquality (List _X) de de'
+        ga <- weakChkEval (List _X, ga)
+        case ga of
+          Nil -> return (Nil, IsNone)
+          _   -> case th of
+            (th ::: _) -> weakChkThinning th de'
+            _ -> case de of
+              Nil -> return (ga, NoneAfter th)
+              _ -> return (ga, NotViaNil (E th))
+{-
+We cannot have the eta law that every thinning th : xs -> xs is the
+identity. Because consider a context where we have the following:
+
+  th0 : xs -> ys
+  th1 : ys -> xs
+  th2 : xs -> ys
+
+Then since th0 ; th1 : xs -> xs and th1 ; th2 : ys -> ys, we would
+then have th0 ; th1 = id and th1 ; th2 = id, and hence
+
+  th0 = th0 ; th1 ; th2 = th2
+
+ie we would have definitional equalites depending on proof search in
+the context.
+-}
 
 -- Ensures that the type is head normalised
 weakEvalSyn :: SynTm -> TCM (SynTm, Type)
@@ -557,6 +669,16 @@ listElim = ElimRule
     ]
   }
 
+-- Thinnings
+
+pattern Thinning _X ga de = A "Th" :& _X :& ga :& de
+
+pattern Th1 = A "1"
+pattern Th0 = A "0"
+pattern ThSemi th th' = A ";" :& th :& th'
+
+-- Kit
+
 newtype I x = I { unI :: x }
   deriving (Functor, Foldable, Traversable)
 
@@ -569,6 +691,15 @@ data (f :*: g) x = (:*:) { outL :: f x , outR :: g x }
 data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
+-- Returns longest prefix of conses, and the suffix
+consPrefix :: Type -> ChkTm -> ([] :*: K ChkTm) (Type, ChkTm)
+consPrefix _X xs = case xs of
+  Nil -> [] :*: K Nil
+  Single x -> [(_X, x)] :*: K Nil
+  ys :++: zs -> case consPrefix _X ys of
+    (ys :*: K Nil) -> case consPrefix _X zs of
+      (zs :*: t) -> (ys ++ zs) :*: t
+    (ys :*: K t) -> ys :*: K (t :++: zs)
 
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim, listElim]
@@ -578,6 +709,10 @@ ourSetup = Setup
       (Sg s t, x :& y) -> do
         t <- weakChkEval (Ty, t // (x ::: s))
         return $ Just $ WeakAnalysis (I (s, x) :*: I (t , y)) (\ (I x' :*: I y') -> (x' :& y'))
+      -- Ensures that a list equal to Nil is Nil, and a list equal to a Cons is a Cons, and hereditarily
+      (List _X, x) -> do
+        _X <- weakChkEval (Ty, _X)
+        return $ Just $ WeakAnalysis (consPrefix _X x) (\ (xs :*: K t) -> foldr Cons t xs)
       _ -> return $ Nothing
   }
 

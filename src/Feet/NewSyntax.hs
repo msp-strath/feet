@@ -30,15 +30,27 @@ data Chk
   | B (Chk m)      -- binder
   | E (Syn m)      -- embedding Syn
   | M m            -- metas
-  deriving (Show, Functor)
+  deriving (Show, Functor, Eq, Ord)
 
 data Syn
   m -- what's the meta
   = V Int           -- variables
-  | P Name Type     -- parameters
+  | P Name (HideEq Type)     -- parameters
   | Syn m :$ Chk m  -- elimination
   | Chk m ::: Chk m -- radicals
-  deriving (Show, Functor)
+  deriving (Show, Functor, Eq, Ord)
+
+newtype HideEq a = Hide { unHide :: a }
+  deriving (Functor)
+
+instance Show (HideEq a) where
+  show (Hide a) = ""
+
+instance Eq (HideEq a) where
+  x == y = True
+
+instance Ord (HideEq a) where
+  compare x y = EQ
 
 type Name = [(String, Int)] -- namespaces and deBruijn levels
 type NameSupply = (Bwd (String, Int), Int) -- (namespaces and deBruijn levels), local deBruijn level
@@ -330,13 +342,21 @@ refresh :: String -> TCM x -> TCM x
 refresh y x = TCM $ \ s (root, level) -> runTCM x s (root :< (y, level), 0)
 
 fresh :: (String, Type) -> (SynTm -> TCM x) -> TCM x
-fresh (y, ty) f = TCM $ \ s (root, level) -> runTCM (f (P (root <>> [(y, level)]) ty)) s (root, level+1)
+fresh (y, ty) f = TCM $ \ s (root, level) -> runTCM (f (P (root <>> [(y, level)]) (Hide ty))) s (root, level+1)
 
-vP :: Name -> Type -> TCM SynTm
+vP :: Name -> HideEq Type -> TCM SynTm
 vP n ty = TCM $ \ s (root, level) -> case B0 <>< n of
    (nz :< (_, k)) | nz == root -> return $ V (level - k - 1)
    _                           -> return $ P n ty
 
+-- type is head normal
+checkEquality :: Type -> ChkTm -> ChkTm -> TCM Bool
+checkEquality ty x y = (==) <$> normalise (ty, x) <*> normalise (ty, y)
+
+demandEquality :: Type -> ChkTm -> ChkTm -> TCM ()
+demandEquality ty x y = do
+  b <- checkEquality ty x y
+  if b then return () else fail $ "not equal: " ++ show x ++ " and " ++ show y
 
 weakAnalyser :: (Type, ChkTm) -> TCM (Maybe WeakAnalysis)
 weakAnalyser x = TCM $ \ s ns -> runTCM (weakAnalyserSetup s x) s ns
@@ -362,7 +382,7 @@ weakChkEval x = do
 weakEvalSyn :: SynTm -> TCM (SynTm, Type)
 -- weakEvalSyn x | trace ("syn: " ++ show x) False = undefined
 weakEvalSyn (V i) = fail "weakEvalSyn applied to non-closed term"
-weakEvalSyn (P n ty) = return (P n ty, ty)
+weakEvalSyn (P n ty) = return (P n ty, unHide ty)
 weakEvalSyn (t ::: ty) = do
   weakChkEval (Ty, ty) >>= \case
     ty -> weakChkEval (ty, t) >>= \case
@@ -439,7 +459,7 @@ normalise = refresh "n" . go where
 
   stop :: SynTm -> TCM (SynTm, Type)
   stop (V i) = error "normalise: applied to non-closed term"
-  stop (P n ty) = (,) <$> vP n ty <*> weakChkEval (Ty, ty)
+  stop (P n ty) = (,) <$> vP n ty <*> weakChkEval (Ty, unHide ty)
   stop (E e ::: t) = stop e
   stop (s ::: t) = error "normalise: failure of canonicity"
   stop (e :$ s) = do

@@ -370,6 +370,17 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
 -- weakChkEval x | trace ("chk: " ++ show x) False = undefined
+weakChkEval (List _X, xs) = case xs of
+  Nil -> return Nil
+  Single x -> return $ Single x
+  xs :++: ys -> do
+    xs <- weakChkEval (List _X, xs)
+    case xs of
+      Nil -> weakChkEval (List _X, ys)
+      Single x -> return (Cons x ys)
+      Cons x xs -> return (Cons x (xs :++: ys))
+      _ -> return (xs :++: ys)
+  E e -> upsE <$> (fst <$> weakEvalSyn e)
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
   (ga', th) <- weakChkThinning _X th de
@@ -395,44 +406,10 @@ isNormalIdThinning Th1           = True
 isNormalIdThinning (Cons Th1 th) = isNormalIdThinning th
 isNormalIdThinning _             = False
 
-{-
-isExpandedThx :: ChkTm -> ChkTm -> Bool
-isExpandedThx x Nil = True
-isExpandedThx x (Cons y xs) = y == x && isExpandedThx x xs
-isExpandedThx x ys = x == ys
-
-isAnnihilatedSemi :: ChkTm -> Maybe ChkTm
-isAnnihilatedSemi (Cons Th0 th) = isAnnihilatedSemi th
-isAnnihilatedSemi (ThSemi th ph) | isExpandedThx Th0 ph = Just th
-                                 | otherwise = ThSemi th <$> isAnnihilatedSemi ph
-isAnnihilatedSemi _ = Nothing
-
-thSemi :: ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm
-thSemi Nil th ga ph de = expandTh0 de
-thSemi rh th ga (Cons Th0 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
-thSemi rh (Cons Th0 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
-thSemi (Cons _ rh) (Cons Th1 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th1 (thSemi rh th ga ph de)
-
-thSemi rh th ga ph de | isExpandedThx Th1 th = ph
-thSemi rh th ga ph de | isExpandedThx Th1 ph = th
-
-thSemi rh th ga ph de | Just th <- isAnnihilatedSemi th = ThSemi th (expandTh0 de)
-thSemi rh th Nil ph de = ThSemi th (expandTh0 de)
-
-data ThinNF = IsNone
-            | IsNonNilId
-            | NoneAfter SynTm
-            | NotViaNil ChkTm
-
-evalThinNF :: ThinNF -> ChkTm -> ChkTm
-evalThinNF IsNone de = expandThx Th0 de
-evalThinNF IsNonNilId de = expandThx Th1 de
-evalThinNF (NoneAfter th) de = go de where
-  go Nil = E th
-  go (Cons _ de) = Cons Th0 (go de)
-  go de = ThSemi (E th) Th0
-evalThinNF (NotViaNil th) = th
--}
+-- assumes argument is head normal
+consView :: ChkTm -> ChkTm
+consView (Single x) = Cons x Nil
+consView xs = xs
 
 -- _X is element type
 -- th is thinning to be evaled
@@ -440,27 +417,27 @@ evalThinNF (NotViaNil th) = th
 -- returns (origin, evaled thinning)
 weakChkThinning :: ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
 weakChkThinning _X th de = case th of
-  Th1 -> case de of
+  Th1 -> case consView de of
     Nil -> return (Nil, NoThin)
     (Cons x de) -> do
       de <- weakChkEval (List _X, de)
       (ga, th) <- weakChkThinning _X Th1 de
       return (Cons x ga, Cons Th1 th)
-    (E _) -> return (de, Th1)
-  Th0 -> case de of
+    _ -> return (de, Th1)
+  Th0 -> case consView de of
     Nil -> return (Nil, NoThin)
     (Cons x de) -> do
       de <- weakChkEval (List _X, de)
       (_, th) <- weakChkThinning _X Th0 de
       return (Nil, Cons Th0 th)
-    (E _) -> return (Nil, Th0)
+    _ -> return (Nil, Th0)
   NoThin -> return (Nil, NoThin)
-  Cons Th1 th -> case de of
+  Cons Th1 th -> case consView de of
     Cons x de -> do
       de <- weakChkEval (List _X, de)
       (ga, th) <- weakChkThinning _X th de
       return (Cons x ga, Cons Th1 th)
-  Cons Th0 th -> case de of
+  Cons Th0 th -> case consView de of
     Cons x de -> do
       de <- weakChkEval (List _X, de)
       (ga, th) <- weakChkThinning _X th de
@@ -473,12 +450,12 @@ weakChkThinning _X th de = case th of
       _ | isNormalIdThinning th -> return (ga, ph)
         | isNormalIdThinning ph -> return (ga, th)
       _ -> case ph of
-        Cons Th0 ph -> case de of
+        Cons Th0 ph -> case consView de of
           Cons x de -> do
             de <- weakChkEval (List _X, de)
             (ga, ps) <- weakChkThinning _X (ThSemi th ph) de
             return (ga, Cons Th0 ps)
-        Cons Th1 ph -> case de of
+        Cons Th1 ph -> case consView de of
           Cons x de -> case th of
             Cons b th -> do
               de <- weakChkEval (List _X, de)
@@ -499,32 +476,6 @@ weakChkThinning _X th de = case th of
           Nil -> return (Nil, expandTh0 de)
           _   -> return (ga, upsE e)
 
-    {-
-  ThSemi th ph -> do
-
-    return $ (rh,) $ case th of
-      IsNone -> IsNone
-      IsNonNilId -> ph
-      NoneAfter th -> NoneAfter th
-      NotViaNil th -> case ph of
-        IsNone -> case th of E th -> NoneAfter th
-        IsNonNilId -> NotViaNil th
-        NoneAfter ph -> NoneAfter ()
-  E th -> do
-    (th, t) <- weakEvalSyn th
-    case t of
-      Thinning _X ga de' -> do
-        -- demandEquality (List _X) de de'
-        ga <- weakChkEval (List _X, ga)
-        case ga of
-          Nil -> return (Nil, IsNone)
-          _   -> case th of
-            (th ::: _) -> weakChkThinning th de'
-            _ -> case de of
-              Nil -> return (ga, NoneAfter th)
-              _ -> return (ga, NotViaNil (E th))
--}
-
 {-
 We cannot have the eta law that every thinning th : xs -> xs is the
 identity. Because consider a context where we have the following:
@@ -544,7 +495,7 @@ the context.
 
 -- Ensures that the type is head normalised
 weakEvalSyn :: SynTm -> TCM (SynTm, Type)
--- weakEvalSyn x | trace ("syn: " ++ show x) False = undefined
+-- weakEvalSyn x | trace ("syn: " ++ show x ++ "\n") False = undefined
 weakEvalSyn (V i) = fail "weakEvalSyn applied to non-closed term"
 weakEvalSyn (P n ty) = return (P n ty, unHide ty)
 weakEvalSyn (t ::: ty) = do
@@ -638,7 +589,7 @@ normalise = refresh "n" . go where
   stop (V i) = error "normalise: applied to non-closed term"
   stop (P n ty) = (,) <$> vP n ty <*> weakChkEval (Ty, unHide ty)
   stop (E e ::: t) = stop e
-  stop (s ::: t) = error "normalise: failure of canonicity"
+  stop (s ::: t) = error $ "normalise: failure of canonicity s = " ++ show s ++ " t = " ++ show t
   stop (e :$ s) = do
     (e', ty) <- stop e
     (m, rule) <- eliminate ty s
@@ -765,17 +716,6 @@ data (f :*: g) x = (:*:) { outL :: f x , outR :: g x }
 data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
--- Returns longest prefix of conses, and the suffix
-consPrefix :: Type -> ChkTm -> ([] :*: K ChkTm) (Type, ChkTm)
-consPrefix _X xs = case xs of
-  Nil -> [] :*: K Nil
-  Single x -> [(_X, x)] :*: K Nil
-  ys :++: zs -> case consPrefix _X ys of
-    (ys :*: K Nil) -> case consPrefix _X zs of
-      (zs :*: t) -> (ys ++ zs) :*: t
-    (ys :*: K t) -> ys :*: K (t :++: zs)
-  E e -> [] :*: K (E e)
-
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim, listElim]
   , weakAnalyserSetup = \ x -> case x of
@@ -784,10 +724,6 @@ ourSetup = Setup
       (Sg s t, x :& y) -> do
         t <- weakChkEval (Ty, t // (x ::: s))
         return $ Just $ WeakAnalysis (I (s, x) :*: I (t , y)) (\ (I x' :*: I y') -> (x' :& y'))
-      -- Ensures that a list equal to Nil is Nil, and a list equal to a Cons is a Cons, and hereditarily
-      (List _X, x) -> do
-        _X <- weakChkEval (Ty, _X)
-        return $ Just $ WeakAnalysis (consPrefix _X x) (\ (xs :*: K t) -> foldr Cons t xs)
       _ -> return $ Nothing
   }
 

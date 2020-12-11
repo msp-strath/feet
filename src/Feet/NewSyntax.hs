@@ -372,9 +372,9 @@ weakChkEval :: (Type, ChkTm) -> TCM ChkTm
 -- weakChkEval x | trace ("chk: " ++ show x) False = undefined
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
-  (ga', th) <- weakChkThinning th de
+  (ga', th) <- weakChkThinning _X th de
   -- demandEquality (List _X) ga ga' --this should never fail
-  return (evalThinNF th de)
+  return th
 weakChkEval x = do
   r <- weakAnalyser x
   case r of
@@ -384,11 +384,18 @@ weakChkEval x = do
       x         -> return (snd x)
 
 
-expandThx :: ChkTm -> ChkTm -> ChkTm
-expandThx x Nil = Nil
-expandThx x (Cons _ xs) = Cons x (expandThx x xs)
-expandThx x ys = x
+expandTh0 :: ChkTm -> ChkTm
+expandTh0 Nil         = Nil
+expandTh0 (Cons x xs) = Cons Th0 (expandTh0 xs)
+expandTh0 ys          = Th0
 
+isNormalIdThinning :: ChkTm -> Bool
+isNormalIdThinning Nil           = True
+isNormalIdThinning Th1           = True
+isNormalIdThinning (Cons Th1 th) = isNormalIdThinning th
+isNormalIdThinning _             = False
+
+{-
 isExpandedThx :: ChkTm -> ChkTm -> Bool
 isExpandedThx x Nil = True
 isExpandedThx x (Cons y xs) = y == x && isExpandedThx x xs
@@ -401,7 +408,7 @@ isAnnihilatedSemi (ThSemi th ph) | isExpandedThx Th0 ph = Just th
 isAnnihilatedSemi _ = Nothing
 
 thSemi :: ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm -> ChkTm
-thSemi Nil th ga ph de = expandThx Th0 de
+thSemi Nil th ga ph de = expandTh0 de
 thSemi rh th ga (Cons Th0 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
 thSemi rh (Cons Th0 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th0 (thSemi rh th ga ph de)
 thSemi (Cons _ rh) (Cons Th1 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th1 (thSemi rh th ga ph de)
@@ -409,9 +416,8 @@ thSemi (Cons _ rh) (Cons Th1 th) (Cons _ ga) (Cons Th1 ph) (Cons _ de) = Cons Th
 thSemi rh th ga ph de | isExpandedThx Th1 th = ph
 thSemi rh th ga ph de | isExpandedThx Th1 ph = th
 
-thSemi rh th ga ph de | Just th <- isAnnihilatedSemi th = ThSemi th (expandThx Th0 de)
-thSemi rh th Nil ph de = ThSemi th (expandThx Th0 de)
-
+thSemi rh th ga ph de | Just th <- isAnnihilatedSemi th = ThSemi th (expandTh0 de)
+thSemi rh th Nil ph de = ThSemi th (expandTh0 de)
 
 data ThinNF = IsNone
             | IsNonNilId
@@ -426,32 +432,76 @@ evalThinNF (NoneAfter th) de = go de where
   go (Cons _ de) = Cons Th0 (go de)
   go de = ThSemi (E th) Th0
 evalThinNF (NotViaNil th) = th
+-}
 
+-- _X is element type
+-- th is thinning to be evaled
 -- de is head normal
--- returns origin + evaled thinning
-weakChkThinning :: ChkTm -> ChkTm -> TCM (ChkTm, ThinNF)
-weakChkThinning th de = case th of
-  Th1 -> return (de, case de of Nil -> IsNone; _ -> IsNonNilId)
-  Th0 -> return (Nil, IsNone)
-  Nil -> return (Nil, IsNone)
+-- returns (origin, evaled thinning)
+weakChkThinning :: ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
+weakChkThinning _X th de = case th of
+  Th1 -> case de of
+    Nil -> return (Nil, NoThin)
+    (Cons x de) -> do
+      de <- weakChkEval (List _X, de)
+      (ga, th) <- weakChkThinning _X Th1 de
+      return (Cons x ga, Cons Th1 th)
+    (E _) -> return (de, Th1)
+  Th0 -> case de of
+    Nil -> return (Nil, NoThin)
+    (Cons x de) -> do
+      de <- weakChkEval (List _X, de)
+      (_, th) <- weakChkThinning _X Th0 de
+      return (Nil, Cons Th0 th)
+    (E _) -> return (Nil, Th0)
+  NoThin -> return (Nil, NoThin)
   Cons Th1 th -> case de of
-    Cons x xs -> do
-      (ga, th) <- weakChkThinning th xs
-      return $ (Cons x ga,) $ case (th, xs) of
-        (IsNone, Nil) -> IsNonNilId
-        (IsNonNilId, xs) -> IsNonNilId
-        _ -> NotViaNil (Cons Th1 (evalThinNF th de))
+    Cons x de -> do
+      de <- weakChkEval (List _X, de)
+      (ga, th) <- weakChkThinning _X th de
+      return (Cons x ga, Cons Th1 th)
   Cons Th0 th -> case de of
-    Cons x xs -> do
-      (ga, th) <- weakChkThinning th xs
-      return $ (ga,) $ case th of
-        IsNone -> IsNone
-        IsNonNilId -> NotViaNil (Cons Th0 (expandThx Th1 xs))
-        NoneAfter th -> NoneAfter th
-        NotViaNil th -> NotViaNil (Cons Th0 th)
+    Cons x de -> do
+      de <- weakChkEval (List _X, de)
+      (ga, th) <- weakChkThinning _X th de
+      return (ga, Cons Th0 th)
   ThSemi th ph -> do
-    (ga, ph) <- weakChkThinning ph de
-    (rh, th) <- weakChkThinning th ga
+    (mu, ph) <- weakChkThinning _X ph de
+    (ga, th) <- weakChkThinning _X th mu
+    case ga of
+      Nil -> return (Nil, expandTh0 de)
+      _ | isNormalIdThinning th -> return (ga, ph)
+        | isNormalIdThinning ph -> return (ga, th)
+      _ -> case ph of
+        Cons Th0 ph -> case de of
+          Cons x de -> do
+            de <- weakChkEval (List _X, de)
+            (ga, ps) <- weakChkThinning _X (ThSemi th ph) de
+            return (ga, Cons Th0 ps)
+        Cons Th1 ph -> case de of
+          Cons x de -> case th of
+            Cons b th -> do
+              de <- weakChkEval (List _X, de)
+              (ga, ps) <- weakChkThinning _X (ThSemi th ph) de
+              return (Cons x ga, Cons b ps)
+            _ -> return (ga, ThSemi th (Cons Th1 ph))
+        ThSemi ph0 ph1 -> do
+          (ka, ph1) <- weakChkThinning _X ph1 de
+          (_, ps0) <- weakChkThinning _X (ThSemi th ph0) ka
+          weakChkThinning _X (ThSemi ps0 ph1) de
+        _ -> return (ga, ThSemi th ph)
+  E e -> do
+    (e, t) <- weakEvalSyn e
+    case t of
+      Thinning _X' ga de' -> do
+        ga <- weakChkEval (List _X, ga)
+        case ga of
+          Nil -> return (Nil, expandTh0 de)
+          _   -> return (ga, upsE e)
+
+    {-
+  ThSemi th ph -> do
+
     return $ (rh,) $ case th of
       IsNone -> IsNone
       IsNonNilId -> ph
@@ -473,6 +523,8 @@ weakChkThinning th de = case th of
             _ -> case de of
               Nil -> return (ga, NoneAfter th)
               _ -> return (ga, NotViaNil (E th))
+-}
+
 {-
 We cannot have the eta law that every thinning th : xs -> xs is the
 identity. Because consider a context where we have the following:
@@ -519,13 +571,22 @@ normalise = refresh "n" . go where
   go (Ty, e) = weakChkEval (Ty, e) >>= \case
     Ty -> return Ty
     Pi s t -> do
-      s <- go (Ty, s)
-      t <- fresh ("x", s) $ \ x -> go (Ty, t // x)
-      return (Pi s t)
+      s' <- go (Ty, s)
+      t' <- fresh ("x", s) $ \ x -> go (Ty, t // x)
+      return (Pi s' t')
     Sg s t -> do
-      s <- go (Ty, s)
-      t <- fresh ("y", s) $ \ y -> go (Ty, t // y)
-      return (Sg s t)
+      s' <- go (Ty, s)
+      t' <- fresh ("y", s) $ \ y -> go (Ty, t // y)
+      return (Sg s' t')
+    One -> return One
+    List s -> do
+      s' <- go (Ty, s)
+      return (List s')
+    Thinning _X ga de -> do
+      _X' <- go (Ty, _X)
+      ga' <- go (List _X, ga)
+      de' <- go (List _X, de)
+      return (Thinning _X' ga' de')
     E e -> do
       (e, _) <- stop e
       return (E e)
@@ -554,20 +615,24 @@ normalise = refresh "n" . go where
             tidy (as :++: bs) cs = tidy as (tidy bs cs)
             tidy as bs = as :++: bs
         return $ tidy xs' ys'
-      {-
-      Cons s ss -> do
-        s'  <- go (x, s)
-        ss' <- go (List x, ss)
-        return $ Cons s' ss'
-      -}
       E e -> do
         (e', _) <- stop e
         return (E e')
+  go (ty@(Thinning _X ga de), th) = do
+    th <- weakChkEval (ty, th)
+    quoth th
   go (E ty, E e) = do
     (e, _) <- weakEvalSyn e
     (e, _) <- stop e
     return (E e)
 
+  quoth :: ChkTm -> TCM ChkTm
+  quoth Th0 = return Th0
+  quoth Th1 = return Th1
+  quoth NoThin = return NoThin
+  quoth (Cons b th) = Cons b <$> quoth th
+  quoth (ThSemi th ph) = ThSemi <$> quoth th <*> quoth ph
+  quoth (E e) = (E . fst) <$> stop e
 
   stop :: SynTm -> TCM (SynTm, Type)
   stop (V i) = error "normalise: applied to non-closed term"
@@ -587,6 +652,12 @@ normalise = refresh "n" . go where
   prem :: Premiss ChkTm ChkTm -> TCM ChkTm
   prem ([] :- p) = go p
   prem (((y, ty):hs) :- p) = fresh (y, ty) $ \ y -> prem ((hs :- p) // y)
+
+normSyn :: SynTm -> TCM ChkTm
+normSyn e = do
+  (e, t) <- weakEvalSyn e
+  normalise (t, upsE e)
+
 
 
 -- Type
@@ -673,9 +744,12 @@ listElim = ElimRule
 
 pattern Thinning _X ga de = A "Th" :& _X :& ga :& de
 
-pattern Th1 = A "1"
-pattern Th0 = A "0"
+pattern Th1 = A "1"  -- id thinning between neutral lists (also a bit)
+pattern Th0 = A "0"  -- empty thinning from Nil to a neutral lists (also a bit)
+pattern NoThin = Nil -- the thinning from Nil to Nil
 pattern ThSemi th th' = A ";" :& th :& th'
+
+
 
 -- Kit
 
@@ -700,6 +774,7 @@ consPrefix _X xs = case xs of
     (ys :*: K Nil) -> case consPrefix _X zs of
       (zs :*: t) -> (ys ++ zs) :*: t
     (ys :*: K t) -> ys :*: K (t :++: zs)
+  E e -> [] :*: K (E e)
 
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim, listElim]
@@ -741,6 +816,21 @@ revTy = ListElim
   (Lam (E (V 1 :$ Cons (E (V 3)) (E (V 0)))))
 
 myTys = Cons Ty (Cons (Pi Ty Ty) (Cons (Sg Ty Ty) Nil)) ::: List Ty
+
+pattern Nat = List One
+
+pattern Z = Nil
+pattern S x = Cons Void x
+
+funTy = Pi Nat (Pi (Thinning One Nil (E (V 0))) (Thinning One Nil (E (V 1))))
+
+list0 = Cons Z (Cons (S Z) (Cons (S (S Z)) Nil))
+
+th0 = Cons Th0 (ThSemi (E $ P [("b", 0)] (Hide $ Thinning Nat list0 list0)) (E $ P [("b", 1)] (Hide $ Thinning Nat list0 list0)))
+th1 = ThSemi (E $ P [("b", 2)] (Hide $ Thinning Nat list0 list0)) th0
+th1Ty = Thinning Nat list0 (Cons Z list0)
+
+
 
 {-
 TODO

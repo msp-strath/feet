@@ -963,29 +963,47 @@ chkPrint Nat n p = either show (paren p pArg) <$> munch n where
     (s, _) <- printSyn e pArg
     return . Right $ concat ["|", s, "|"]
   munch x = return . Right $ show x
-chkPrint (List _X) xs p = either brk (paren p pArg) <$> munch xs where
-  munch :: ChkTm -> TCM (Either String String)
-  munch Nil = return $ Left ""
-  munch (Single x) = Left <$> chkPrint _X x pElt
-  munch (xs :++: ys) = do
-    xs <- munch xs
-    ys <- munch ys
-    case (xs, ys) of
-      (Left xs, Left ys) -> return . Left $ glom xs ys
-      (Left "", ys) -> return ys
-      (xs, Left "") -> return xs
-      _ -> return . Right $ concat
-        [either brk id xs, " ++ ", either brk id ys]
-  munch (E e) = (Right . fst) <$> printSyn e pArg
+chkPrint (List _X) xs p = blat <$> munch xs where
+  munch :: ChkTm -> TCM (String, Bool, String)
+  munch Nil = return ("", False, "")
+  munch (Single x) = (\ s -> (s, False, "")) <$> chkPrint _X x pElt
+  munch (xs :++: ys) = glom <$> munch xs <*> munch ys
+  munch (E e) = (\ (s, _) -> ("", False, s)) <$> printSyn e pArg
   munch (e :-: List f) = do
     (s, _S) <- printSyn e pArg
     f <- chkPrint (Pi _S (List _X)) f pArg
-    return . Right $ concat ["List ", f, " ", s]
-  munch x = return . Right $ show x
+    return $ ("", True, concat ["List ", f, " ", s])
+  munch x = return $ ("", True, show x)
   brk s = concat ["[", s, "]"]
-  glom "" ys = ys
-  glom xs "" = xs
-  glom xs ys = concat [xs, ", ", ys]
+  glom ("", _, "") ys = ys
+  glom xs ("", _, "") = xs
+  glom (xs, _, "") ("", b, ys) = (xs, b, ys)
+  glom (xs, _, "") (ys, b, zs) = (xs ++ ", " ++ ys, b, zs)
+  glom ("", _, xs) ("", _, zs) = ("", True, xs ++ " ++ " ++ zs)
+  glom (ws, _, xs) ("", _, zs) = (ws, True, concat [xs, " ++ ", zs])
+  glom (ws, _, xs) (ys, _, zs) = (ws, True, concat [xs, " ++ [", ys, "] ++ ", zs])
+  blat (xs, _, "") = "[" ++ xs ++ "]"
+  blat ("", b, ys) = (if b then paren p pArg else id) ys
+  blat (xs, _ ,  ys) = paren p pArg $ concat ["[", xs, "] ++ ", ys]
+chkPrint (Thinning _X ga de) th p = munch th where
+  munch :: ChkTm -> TCM String
+  munch Nil = return $ "."
+  munch Th0 = return $ "0.."
+  munch Th1 = return $ "1.."
+  munch (Cons (A a) th) = (a ++) <$> munch th
+  munch (ThSemi th ph) = do
+    th <- munch th
+    ph <- munch ph
+    return $ concat ["(",th,";",ph,")"]
+  munch (E e) = fst <$> printSyn e pArg
+  munch x@(e :-: List f) = do
+    (e, src) <- printSyn e pArg
+    case src of
+      Thinning _W _ _ -> do
+        f <- chkPrint (Pi _W _X) f pArg
+        return $ concat ["(List ", f, " ", e, ")"]
+      _ -> return $ show x
+  munch x = return $ show x
 chkPrint _ (E e) p = fst <$> printSyn e p
 chkPrint _ t _ = return $ "(" ++ show t ++ ")"
 

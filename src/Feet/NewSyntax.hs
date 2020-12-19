@@ -362,6 +362,14 @@ vP n ty = TCM $ \ s (root, level) -> case B0 <>< n of
    (nz :< (_, k)) | nz == root -> return $ V (level - k - 1)
    _                           -> return $ P n ty
 
+pNom :: Name -> TCM String
+pNom n = TCM $ \ s (root, _) -> case B0 <>< n of
+    (nz :< s) | nz == root  -> return $ seg s
+    _                       -> return $ foldMap seg n
+  where
+    seg (x, 0) = x
+    seg (x, i) = x ++ show i
+    
 -- type is head normal
 checkEquality :: Type -> ChkTm -> ChkTm -> TCM Bool
 checkEquality ty x y = (==) <$> normalise (ty, x) <*> normalise (ty, y)
@@ -887,6 +895,128 @@ run x = runTCM x ourSetup initNameSupply
 
 chkEval = run . weakChkEval
 evalSyn = run . weakEvalSyn
+
+
+-- type-directed printing
+
+printNormSyn :: SynTm -> IO ()
+printNormSyn e = putStrLn . either id id . run $ do
+  (e, t) <- weakEvalSyn e
+  n <- normalise (t, upsE e)
+  refresh "print" $ chkPrint t n 0
+
+chkPrint :: ChkTm -> ChkTm -> Int -> TCM String
+chkPrint Ty _T p = case _T of
+  Ty -> return "Ty"
+  Pi _S _T -> do
+    _S' <- chkPrint Ty _S 0
+    (v, _T') <- fresh (nomo _S, _S) $ \ x ->
+      (,) <$> (fst <$> printSyn x 0) <*> chkPrint Ty (_T // x) 0
+    return . paren p pArg $ concat ["(", v, " : ", _S', ") -> ", _T']
+  Sg _S _T ->  do
+    _S' <- chkPrint Ty _S 0
+    (v, _T') <- fresh (nomo _S, _S) $ \ x ->
+      (,) <$> (fst <$> printSyn x 0) <*> chkPrint Ty (_T // x) 0
+    return . paren p pArg $ concat ["(", v, " : ", _S', ") * ", _T']
+  One -> return "1"
+  Nat -> return "Nat"
+  List _X -> do
+    _X' <- chkPrint Ty _X pArg
+    return . paren p pArg $ concat ["List ", _X']
+  Thinning _X ga de -> do
+    _X' <- chkPrint Ty _X 0
+    ga' <- chkPrint (List _X) ga pScope
+    de' <- chkPrint (List _X) de pScope
+    return . paren p pArg $ concat [ga', " <[", _X', "]= ", de']
+  e :-: Idapter -> fst <$> printSyn e p
+  _X -> return $ "(" ++ show _X ++ ")"
+chkPrint _T@(Pi _ _) f p = case f of
+    Lam _ -> paren p pArg <$> lams "" _T f
+    e :-: Idapter -> fst <$> printSyn e p
+    _ -> return $ "(" ++ show f ++ ")"
+  where
+    lams args (Pi _S _T) (Lam t) = fresh (nomo _S, _S) $ \ x -> do
+      (v, _) <- printSyn x 0
+      lams (args ++ v ++ " ") (_T // x) (t // x)
+    lams args _X x = do
+      body <- chkPrint _X x 0
+      return . concat $ ["\\ ", args, "-> ", body]
+chkPrint (Sg _S _T) (s :& t) p = do
+  s' <- chkPrint _S s pElt
+  _T <- weakChkEval (Ty, _T // (s ::: _S))
+  t' <- chkPrint _T t pCdr
+  return . paren p pElt $ concat [s', ", ", t']
+chkPrint One _ _ = return "<>"
+chkPrint Nat n p = either show (paren p pArg) <$> munch n where
+  munch :: ChkTm -> TCM (Either Int String)
+  munch Nil = return $ Left 0
+  munch (Single _) = return $ Left 1
+  munch (x :++: y) = do
+    x <- munch x
+    y <- munch y
+    case (x, y) of
+      (Left x, Left y) -> return . Left $ x + y
+      _ -> return . Right $ concat
+        [either show id x, "+", either show id y]
+  munch (E e) = (Right . fst) <$> printSyn e pArg
+  munch (e :-: _) = do
+    (s, _) <- printSyn e pArg
+    return . Right $ concat ["|", s, "|"]
+  munch x = return . Right $ show x
+chkPrint (List _X) xs p = either brk (paren p pArg) <$> munch xs where
+  munch :: ChkTm -> TCM (Either String String)
+  munch Nil = return $ Left ""
+  munch (Single x) = Left <$> chkPrint _X x pElt
+  munch (xs :++: ys) = do
+    xs <- munch xs
+    ys <- munch ys
+    case (xs, ys) of
+      (Left xs, Left ys) -> return . Left $ glom xs ys
+      (Left "", ys) -> return ys
+      (xs, Left "") -> return xs
+      _ -> return . Right $ concat
+        [either brk id xs, " ++ ", either brk id ys]
+  munch (E e) = (Right . fst) <$> printSyn e pArg
+  munch (e :-: List f) = do
+    (s, _S) <- printSyn e pArg
+    f <- chkPrint (Pi _S (List _X)) f pArg
+    return . Right $ concat ["List ", f, " ", s]
+  munch x = return . Right $ show x
+  brk s = concat ["[", s, "]"]
+  glom "" ys = ys
+  glom xs "" = xs
+  glom xs ys = concat [xs, ", ", ys]
+chkPrint _ (E e) p = fst <$> printSyn e p
+chkPrint _ t _ = return $ "(" ++ show t ++ ")"
+
+printSyn :: SynTm -> Int -> TCM (String, ChkTm)
+printSyn (P x (Hide t)) _ = (, t) <$> pNom x
+printSyn e p = do
+  (_, t) <- weakEvalSyn e
+  return $ ("(" ++ show e ++ ")", t)
+
+paren :: Int -> Int -> String -> String
+paren p l x = if p >= l then concat ["(", x, ")"] else x
+
+pArg, pElt, pCdr, pScope :: Int
+pArg = 20
+pElt = 17
+pCdr = 15
+pScope = 10
+
+nomo :: ChkTm -> String
+nomo Ty = "X"
+nomo (Pi _ _T) = if toTy _T then "F" else "f" where
+  toTy Ty = True
+  toTy (Pi _ _T) = toTy _T
+  toTy (Sg _S _T) = toTy _S || toTy _T
+  toTy _ = False
+nomo (Sg _S _T) = nomo _S ++ nomo _T
+nomo (List One) = "n"
+nomo (List _X) = nomo _X ++ "s"
+nomo (Thinning _ _ _) = "th"
+nomo _ = "x"
+
 
 -- testing
 

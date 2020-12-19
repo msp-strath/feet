@@ -1009,6 +1009,47 @@ chkPrint _ t _ = return $ "(" ++ show t ++ ")"
 
 printSyn :: SynTm -> Int -> TCM (String, ChkTm)
 printSyn (P x (Hide t)) _ = (, t) <$> pNom x
+printSyn (e :$ s) p = do
+  (e', _T) <- printSyn e pTarg
+  case _T of
+    Pi _S _T -> do
+      _S <- weakChkEval (Ty, _S)
+      s' <- chkPrint _S s pArg
+      _T <- weakChkEval (Ty, _T // (s ::: _S))
+      return . (, _T) . paren p (pTarg + 1) $ concat
+        [e', " ", s']
+    Sg _S _T -> case s of
+        Fst -> return (paren p (pTarg + 1) (e' ++ " -fst"), _S)
+        Snd -> do
+          _T <- weakChkEval (Ty, _T // (e :$ Fst))
+          return (paren p (pTarg + 1) (e' ++ " -snd"), _S)
+        _ -> return . (, _T) . paren p (pTarg + 1) $ concat
+          [e', " (", show s, ")"]
+    List _X -> case s of
+      ListElim _P n c -> do
+        fresh ("fun", Pi (List _X) _P) $ \ fun -> do
+          (funh, _) <- printSyn fun 0
+          funTy <- chkPrint Ty (Pi (List _X) _P) 0
+          (funNl, _N) <- printSyn (fun :$ Nil) 0
+          _N <- weakChkEval (Ty, _N)
+          funNr <- chkPrint _N n 0
+          cq <- fresh (nomo _X, _X) $ \ x ->
+                fresh (nomo (List _X), List _X) $ \ xs -> do
+            (funCl, _C) <- printSyn (fun :$ Cons (E x) (E xs)) 0
+            _C <- weakChkEval (Ty, _C)
+            funCr <- chkPrint _C (c // (fun :$ E xs) // xs // x) 0
+            return $ concat [funCl, " = ", funCr]
+          (body, _T) <- printSyn (fun :$ E e) pTarg
+          _T <- weakChkEval (Ty, _T)
+          return . (, _T) . paren p pTarg $ concat
+            [ "let ", funh, " : ", funTy, "; "
+            , funNl, " = ", funNr, "; "
+            , cq, " in " , body
+            ]
+      _ -> return . (, _T) . paren p (pTarg + 1) $ concat
+        [e', " (", show s, ")"]
+    _ -> return . (, _T) . paren p (pTarg + 1) $ concat
+      [e', " (", show s, ")"]
 printSyn e p = do
   (_, t) <- weakEvalSyn e
   return $ ("(" ++ show e ++ ")", t)
@@ -1016,10 +1057,11 @@ printSyn e p = do
 paren :: Int -> Int -> String -> String
 paren p l x = if p >= l then concat ["(", x, ")"] else x
 
-pArg, pElt, pCdr, pScope :: Int
-pArg = 20
-pElt = 17
-pCdr = 15
+pArg, pTarg, pElt, pCdr, pScope :: Int
+pArg = 60
+pTarg = 50
+pElt = 40
+pCdr = 30
 pScope = 10
 
 nomo :: ChkTm -> String

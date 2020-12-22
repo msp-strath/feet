@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE PatternSynonyms #-}
-module Feet.Semantics where
+module Feet.Old.Semantics where
 
 import Prelude hiding (fail)
 
@@ -14,7 +14,7 @@ import Control.Monad hiding (fail)
 import Control.Monad.Fail
 
 import Utils.Bwd
-import Feet.Syntax
+import Feet.Old.Syntax
 
 type Env = [Value]
 

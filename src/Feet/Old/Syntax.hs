@@ -1,5 +1,5 @@
 {-# LANGUAGE PatternSynonyms, GADTs #-}
-module Feet.Syntax where
+module Feet.Old.Syntax where
 
 import Utils.Bwd
 

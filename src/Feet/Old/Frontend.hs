@@ -1,9 +1,9 @@
-module Feet.Frontend where
+module Feet.Old.Frontend where
 
 import Data.List
 
-import Feet.Syntax
-import Feet.Semantics
+import Feet.Old.Syntax
+import Feet.Old.Semantics
 
 data Tel = T0 | Chk :\: Abs Tel deriving Show
 

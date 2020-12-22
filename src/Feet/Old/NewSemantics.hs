@@ -3,7 +3,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Feet.NewSemantics where
+module Feet.Old.NewSemantics where
 
 import Prelude hiding (fail)
 
@@ -17,7 +17,7 @@ import Control.Monad.Fail
 
 import Utils.Bwd
 
-import Feet.Syntax
+import Feet.Old.Syntax
 
 
 

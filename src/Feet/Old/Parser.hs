@@ -1,6 +1,6 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Feet.Parser where
+module Feet.Old.Parser where
 
 import Control.Applicative
 import Control.Monad hiding (fail)
@@ -8,9 +8,9 @@ import Control.Arrow ((***))
 import Data.List
 import Data.Char
 
-import Feet.Syntax
-import Feet.Thinning
-import Feet.Frontend
+import Feet.Old.Syntax
+import Feet.Old.Thinning
+import Feet.Old.Frontend
 
 newtype DBP x = DBP {dbp :: [String] -> String -> [(x, String)]}
   deriving (Semigroup, Monoid)

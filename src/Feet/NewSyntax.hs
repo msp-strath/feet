@@ -311,6 +311,7 @@ data ElimRule = ElimRule
   , elimPremisses :: [Premiss ChkEx Meta]
   , reductType :: ChkEx
   , betaRules :: [(ChkPa, ChkEx)]
+  , fusionRules :: [(ChkPa, ChkPa, ChkEx)]
   }
   deriving Show
 
@@ -643,12 +644,18 @@ weakEvalSyn (e :$ s) = do
   rTy <- weakChkEval (Ty, (instantiate m $ reductType rule) // e)
   (,rTy) <$>
     case e of
+      ((e' :-: a) ::: _) -> do
+        (e', src) <- weakEvalSyn e'
+        case [ (m ++ msrc ++ ma, rhs) | (psrc, pa, rhs) <- fusionRules rule, msrc <- trail (match psrc src), ma <- trail (match pa a) ] of
+          [(m, rhs)] -> return (e' :$ instantiate m rhs)
+          [] -> return (e :$ s)
+          _ -> fail "weakEvalSyn: more than one fusion rule applies"
       (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
         [(mt, rhs)] -> do
            r <-  weakChkEval (rTy, instantiate (m ++ mt) rhs)
            return (r ::: rTy)
         [] -> return (e :$ s)
-        _  -> fail "weakEvalSyn: more than one rule applies"
+        _  -> fail "weakEvalSyn: more than one beta rule applies"
       _ -> return (e :$ s)
 
 
@@ -750,7 +757,14 @@ normalise = refresh "n" . go where
   stop :: SynTm -> TCM (SynTm, Type)
   stop (V i) = error "normalise: applied to non-closed term"
   stop (P n ty) = (,) <$> vP n ty <*> weakChkEval (Ty, unHide ty)
-  stop (E e ::: t) = stop e
+  stop ((e :-: a) ::: t) = do
+    (e', ty) <- stop e
+    a' <- quad ty a t
+    case a' of
+      Idapter -> return (e', ty)
+      _ -> do
+        t' <- go (Ty, t)
+        return ((e' :-: a') ::: t', t)
   stop (s ::: t) = error $ "normalise: failure of canonicity s = " ++ show s ++ " t = " ++ show t
   stop (e :$ s) = do
     (e', ty) <- stop e
@@ -786,6 +800,7 @@ piElim = ElimRule
   , elimPremisses = [[] :- (em "S", "s" :/ B0)]
   , reductType = M ("T" :/ si)
   , betaRules = [(Lam (pm "t"), M ("t" :/ si))]
+  , fusionRules = []
   }
   where si = B0 :< (em "s" ::: em "S")
 
@@ -801,6 +816,7 @@ fstElim = ElimRule
   , elimPremisses = []
   , reductType = M ("S" :/ B0)
   , betaRules = [(pm "s" :& pm "t", em "s")]
+  , fusionRules = []
   }
 
 sndElim = ElimRule
@@ -809,6 +825,7 @@ sndElim = ElimRule
   , elimPremisses = []
   , reductType = M ("T" :/ si)
   , betaRules = [(pm "s" :& pm "t", em "t")]
+  , fusionRules = []
   }
   where si = B0 :< (V 0 :$ Fst)
 
@@ -845,11 +862,13 @@ listElim = ElimRule
          (M ("P" :/ (B0 :< ((E (V 0) :++: em "ys") ::: List (em "X")))))
          (E ((em "ys" ::: List (em "X")) :$ ListElim (em "P") (em "n") (em "c")))
          (M ("c" :/ (B0 :< V 2 :< ((E (V 1) :++: em "ys") ::: List (em "X")) :< V 0)))))
-    {-
-    , (Cons (pm "x") (pm "xs"),
-       M ("c" :/ (B0 :< (em "x" ::: em "X") :< (em "xs" ::: List (em "X")) :<
-        ((em "xs" ::: List (em "X")) :$ ListElim (em "P") (em "n") (em "c")))))
-    -}
+    ]
+  , fusionRules =
+    [ (List (pm "W"), List (pm "f"), ListElim (M ("P" :/ (B0 :< ((V 0 :-: List (em "f")) ::: List (em "X"))))) (em "n")
+        (M ("c" :/ (B0
+            :< ((em "f" ::: Pi (em "W") (em "X")) :$ E (V 2))
+            :< ((V 1 :-: List (em "f")) ::: List (em "X"))
+            :< V 0))))
     ]
   }
 
@@ -1124,6 +1143,8 @@ adaptTh1Ty = Thinning (Sg Nat Nat) ((list0 ::: List Nat) :-: List dup) ((Cons Z 
 
 adaptTh1 = ((th1 ::: th1Ty) :-: List dup)
               ::: adaptTh1Ty
+
+revMappedPartlyNeutralList = ((((E (P [("ys", 0)] (Hide (List Ty))) :++: E myTys) ::: List Ty) :-: (List (Lam (Sg (E (V 0)) (E (V 1)))))) ::: List Ty) :$ revTy :$ Nil
 
 {-
 TODO

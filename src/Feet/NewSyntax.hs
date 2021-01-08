@@ -406,6 +406,11 @@ weakChkEval (List _X, xs) = case xs of
   e :-: a ->  do
     (e, src) <- weakEvalSyn e
     weakAdapt e src a (List _X)
+weakChkEval (Enum as, x) = do
+  weakFind as x >>= \case
+    Right t -> return t
+    Left _ -> fail ("out of bounds as = " ++ show as ++ " x = " ++ show x)
+
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
   (ga', th) <- weakChkThinning _X th de
@@ -422,6 +427,35 @@ weakChkEval x = do
         a <- weakEvalAdapter src a tgt
         weakAdapt e src a tgt
       x         -> return (snd x)
+
+weakFind :: ChkTm -> ChkTm -> TCM (Either (ChkTm -> ChkTm, ChkTm) ChkTm)
+weakFind as x = weakChkEval (List Atom, as) >>= \case
+    Nil -> return (Left (id, x))
+    Single a -> do
+      a <- weakChkEval (Atom, a)
+      case (a, x) of
+        (_, Z) -> return (Right Z)
+        (_, S x) -> return (Left (S, x))
+        (A a, A b) | a == b -> return (Right Z)
+                   | otherwise -> return (Left (S, x))
+        (A a, (A b :& Z)) | a == b -> return (Right Z)
+                   | otherwise -> return (Left (S, x))
+        (A a, (A b :& S n)) | a == b -> return (Left (S, (A b :& n)))
+                   | otherwise -> return (Left (S, x))
+        (_, E e) -> do
+          (e, _) <- weakEvalSyn e
+          return (Right (upsE e))
+    as :++: bs -> weakFind as x >>= \case
+      Right t -> return (Right t)
+      Left (f, x) -> weakFind bs x >>= \case
+        Right t -> return (Right (f t))
+        Left (g, x) -> return (Left (f . g, x))
+    _ -> case x of
+      E e -> do
+        (e, _) <- weakEvalSyn e
+        return (Right (upsE e))
+      _ -> fail "expecting neutral list of atoms and neutral x"
+
 
 -- assumes types are in whnf and V-closed
 weakAdapt :: SynTm -> ChkTm -> Adapter -> ChkTm -> TCM ChkTm
@@ -663,6 +697,10 @@ normalise :: (Type, ChkTm) -> TCM ChkTm
 normalise = refresh "n" . go where
   go (Ty, e) = weakChkEval (Ty, e) >>= \case
     Ty -> return Ty
+    Atom -> return Atom
+    Enum as -> do
+      as' <- go (List Atom, as)
+      return (Enum as')
     Pi s t -> do
       s' <- go (Ty, s)
       t' <- fresh ("x", s) $ \ x -> go (Ty, t // x)
@@ -685,6 +723,14 @@ normalise = refresh "n" . go where
       a' <- quad src a Ty
       return (e' :-: a')
     x -> error $ "hm " ++ show x
+  go (Atom, e) = weakChkEval (Atom, e) >>= \case
+    A s -> return (A s)
+    E e -> (upsE .fst) <$> stop e
+  go (Enum as, x) = weakChkEval (Enum as, x) >>= \case
+    Z -> return Z
+    S x -> (consView <$> weakChkEval (List Atom, as)) >>= \case
+      Cons _ as -> S <$> go (Enum as, x)
+    E e -> (upsE .fst) <$> stop e
   go (a@(Pi s t), e) = Lam <$> (fresh ("x", s) $ \ x -> go (t // x, E ((e ::: a) :$ E x)))
   go (a@(Sg s t), e) = do
     e <- weakChkEval (a, e)
@@ -742,8 +788,6 @@ normalise = refresh "n" . go where
     (ga, tgt) <- reconstructThinningAdapterTarget src a _X de
     a' <- quad src a tgt
     return (ga, e' :-: a')
-
-
 
   quad :: ChkTm -> Adapter -> ChkTm -> TCM Adapter
   quad src Idapter tgt = return Idapter
@@ -872,6 +916,14 @@ listElim = ElimRule
     ]
   }
 
+-- Nat
+
+pattern Nat = List One
+
+pattern Z = Nil
+pattern S x = Cons Void x
+
+
 -- Thinnings
 
 pattern Thinning _X ga de = A "Th" :& _X :& ga :& de
@@ -881,7 +933,36 @@ pattern Th0 = A "0"  -- empty thinning from Nil to a neutral lists (also a bit)
 pattern NoThin = Nil -- the thinning from Nil to Nil
 pattern ThSemi th th' = A ";" :& th :& th'
 
+-- Atoms
 
+pattern Atom = A "Atom"
+
+  -- introduced by `A s` for nonempty `s`
+
+-- Enumerations
+
+pattern Enum as = A "Enum" :& as -- as is a list of Atoms
+
+pattern EnumElim _P ms = A "EnumElim" :& (B _P) :& ms
+
+  -- introduced by a number (less than the length of as), or, also an Atom in the list (optionally paired with a number)
+
+{- does not work
+enumElim = ElimRule
+  { targetType = Enum (pm "as")
+  , eliminator = EnumElim (pm "P") (pm "ms")
+  , elimPremisses =
+    [ [("es", Enum (em "as"))] :- (Ty, "P" :/ B0)
+    , [] :- (Tuple ((em "as" ::: List Atom) :-: List (Lam (M ("P" :/ (B0 :< V 0))))), "ms" :/ B0)
+    ]
+  , reductType = M ("P" :/ (B0 :< V 0))
+  , betaRules =
+    [ (Z, (em "ms" ::: (Tuple ((em "as" ::: List Atom) :-: List (Lam (M ("P" :/ (B0 :< V 0))))), "ms" :/ B0)) :$ Fst)
+    , (S x, )
+    ]
+  , fusionRules = []
+  }
+-}
 
 -- Kit
 
@@ -900,6 +981,7 @@ data (f :+: g) x = InL (f x) | InR (g x)
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim, listElim]
   , weakAnalyserSetup = \ x -> case x of
+      (Ty, Enum as) -> return $ Just $ WeakAnalysis (I (List Atom, as)) (\ (I as') -> Enum as')
       (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
       (Ty, Sg s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
       (Sg s t, x :& y) -> do
@@ -927,6 +1009,10 @@ printNormSyn e = putStrLn . either id id . run $ do
 chkPrint :: ChkTm -> ChkTm -> Int -> TCM String
 chkPrint Ty _T p = case _T of
   Ty -> return "Ty"
+  Atom -> return "Atom"
+  Enum as -> do
+    as' <- chkPrint (List Atom) as pArg
+    return . paren p pArg $ concat ["Enum ", as']
   Pi _S _T -> do
     _S' <- chkPrint Ty _S 0
     (v, _T') <- fresh (nomo _S, _S) $ \ x ->
@@ -949,6 +1035,12 @@ chkPrint Ty _T p = case _T of
     return . paren p pArg $ concat [ga', " <[", _X', "]= ", de']
   e :-: Idapter -> fst <$> printSyn e p
   _X -> return $ "(" ++ show _X ++ ")"
+chkPrint Atom a p = case a of
+  A s -> return ("'" ++ s)
+  e :-: Idapter -> fst <$> printSyn e p
+chkPrint (Enum as) x p = tryATag as x >>= \case
+  Just (s, n) -> return ("'" ++ s ++ if n == 0 then "" else "^" ++ show n)
+  Nothing -> notATag 0 x p
 chkPrint _T@(Pi _ _) f p = case f of
     Lam _ -> paren p pArg <$> lams "" _T f
     e :-: Idapter -> fst <$> printSyn e p
@@ -1073,6 +1165,28 @@ printSyn e p = do
   (_, t) <- weakEvalSyn e
   return $ ("(" ++ show e ++ ")", t)
 
+tryATag :: ChkTm -> ChkTm -> TCM (Maybe (String, Int))
+tryATag as Z = (consView <$> weakChkEval (List Atom, as)) >>= \case
+  Cons a _ -> weakChkEval (Atom, a) >>= \case
+    A s -> return (Just (s, 0))
+    _   -> return Nothing
+  _ -> fail ("out of bounds as = " ++ show as)
+tryATag as (S x) = (consView <$> weakChkEval (List Atom, as)) >>= \case
+  Cons a as -> weakChkEval (Atom, a) >>= \case
+    A a -> tryATag as x >>= \case
+      Just (s, n) -> return (Just (s, if a == s then n+1 else n))
+      Nothing -> return Nothing
+    _   -> return Nothing
+  _ -> fail ("out of bounds as = " ++ show as ++ " x = " ++ show x)
+tryATag _ _ = return Nothing
+
+notATag :: Int -> ChkTm -> Int -> TCM String
+notATag acc Z p = return (show acc)
+notATag acc (S x) p = notATag (acc+1) x p
+notATag acc (E e) p = do
+  (s, _) <- printSyn e (if acc == 0 then p else pCdr)
+  if acc == 0 then return s else return (paren p pArg (show acc ++ " + " ++ s))
+
 paren :: Int -> Int -> String -> String
 paren p l x = if p >= l then concat ["(", x, ")"] else x
 
@@ -1116,11 +1230,6 @@ revTy = ListElim
 
 myTys = Cons Ty (Cons (Pi Ty Ty) (Cons (Sg Ty Ty) Nil)) ::: List Ty
 
-pattern Nat = List One
-
-pattern Z = Nil
-pattern S x = Cons Void x
-
 funTy = Pi Nat (Pi (Thinning One Nil (E (V 0))) (Thinning One Nil (E (V 1))))
 
 list0 = Cons Z (Cons (S Z) (Cons (S (S Z)) Nil))
@@ -1145,6 +1254,12 @@ adaptTh1 = ((th1 ::: th1Ty) :-: List dup)
               ::: adaptTh1Ty
 
 revMappedPartlyNeutralList = ((((E (P [("ys", 0)] (Hide (List Ty))) :++: E myTys) ::: List Ty) :-: (List (Lam (Sg (E (V 0)) (E (V 1)))))) ::: List Ty) :$ revTy :$ Nil
+
+myEnum = Enum (Cons (A "a") (Cons (A "c") (Cons (A "c") Nil)))
+myEnumNeut = Enum (Cons (A "a") (Cons (E (P [("q", 0)] (Hide Atom))) (Cons (A "c") Nil)))
+
+
+
 
 {-
 TODO

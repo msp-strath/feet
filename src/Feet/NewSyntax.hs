@@ -1258,6 +1258,10 @@ revMappedPartlyNeutralList = ((((E (P [("ys", 0)] (Hide (List Ty))) :++: E myTys
 myEnum = Enum (Cons (A "a") (Cons (A "c") (Cons (A "c") Nil)))
 myEnumNeut = Enum (Cons (A "a") (Cons (E (P [("q", 0)] (Hide Atom))) (Cons (A "c") Nil)))
 
+enumAtoms =
+  ListElim (List (Enum (E (V 0)))) Nil (Cons Z (V 0 :-: List (Lam $ S (E (V 0)))))
+    
+
 
 
 

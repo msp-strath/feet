@@ -196,6 +196,7 @@ type Matching = [(String, ChkTm)]
 
 match :: ChkPa -> ChkTm -> Maybe Matching
 match (M (x,th)) t = ((:[]) . (x,)) <$> thicken th t
+match (Cons x xs) (Single t) = (++) <$> match x t <*> match xs Nil
 match (A a) (A a') = guard (a == a') >> return []
 match (t :& t') (v :& v') = (++) <$> match t v <*> match t' v'
 match (B t) (B t') = match t t'
@@ -916,6 +917,39 @@ listElim = ElimRule
     ]
   }
 
+-- Predicate lifting of List
+
+pattern AllP _P _Acc = A "All" :& (B _P) :& _Acc
+-- constructors overloaded Nil, Single, :++:
+
+-- for now, we compute it recursively. In the long run, to take
+-- advantage of structure (eg naturality of selection, that it is a
+-- presheaf...), we want to use the inductive version in order to
+-- expose said structure more easily
+
+allPElim = ElimRule
+  { targetType = List (pm "X")
+  , eliminator = AllP (pm "P") (pm "Acc")
+  , elimPremisses =
+    [ [("x", em "X")] :- (Ty, "P" :/ B0)
+    , [] :- (Ty, "Acc" :/ B0)
+    ]
+  , reductType = Ty
+  , betaRules =
+    [ (Nil, em "Acc")
+    , (Single (pm "x"),
+       Sg (M ("P" :/ (B0 :< (em "x" ::: em "X")))) (em "Acc"))
+    , (pm "xs" :++: pm "ys",
+       E ((em "xs" ::: List (em "X")) :$ AllP (em "P") (E ((em "ys" ::: List (em "X")) :$ AllP (em "P") (em "Acc")))))
+    ]
+
+  , fusionRules =
+    [ (List (pm "W"), List (pm "f"), AllP (M ("P" :/ (B0 :< ((em "f" ::: Pi (em "W") (em "X")) :$ E (V 0))))) (em "Acc"))
+    ]
+  }
+
+
+
 -- Nat
 
 pattern Nat = List One
@@ -979,7 +1013,7 @@ data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
 ourSetup = Setup
-  { elimRules = [piElim, fstElim, sndElim, listElim]
+  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim]
   , weakAnalyserSetup = \ x -> case x of
       (Ty, Enum as) -> return $ Just $ WeakAnalysis (I (List Atom, as)) (\ (I as') -> Enum as')
       (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
@@ -1258,10 +1292,14 @@ revMappedPartlyNeutralList = ((((E (P [("ys", 0)] (Hide (List Ty))) :++: E myTys
 myEnum = Enum (Cons (A "a") (Cons (A "c") (Cons (A "c") Nil)))
 myEnumNeut = Enum (Cons (A "a") (Cons (E (P [("q", 0)] (Hide Atom))) (Cons (A "c") Nil)))
 
+listABC = (Cons (A "a") (Cons (A "b") (Cons (A "c") Nil)))
+
+predABC = P [("P", 0)] (Hide (Pi (Enum listABC) Ty))
+
 enumAtoms =
   ListElim (List (Enum (E (V 0)))) Nil (Cons Z (V 0 :-: List (Lam $ S (E (V 0)))))
-    
 
+allPabc = (listABC ::: List Atom) :$ enumAtoms :$ AllP (E (predABC :$ E (V 0))) One
 
 
 

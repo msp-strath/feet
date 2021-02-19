@@ -304,18 +304,38 @@ instance (Substitute a, Substitute b) => Substitute (Premiss a b) where
 
 
 data Premiss a b = [(String,a)] :- (a,b) -- types of params, (name and type of s. var)
-  deriving (Show)
+  deriving Show
+
+data Prog' = Ret ChkEx
+           | Case ChkEx ChkEx Prog -- type, scrutinee, cases
+  deriving Show
+
+type Prog = [(ChkPa,Prog')]
+
+runProg :: Matching -> Value -> Prog -> TCM (Maybe ChkTm)
+runProg m v ps =
+  case [ (mv, rhs) | (p, rhs) <- ps, mv <- trail (match p v) ] of
+    [ (mv, rhs) ] -> runProg' (mv ++ m) rhs
+    _ -> return Nothing
+
+runProg' :: Matching -> Prog' -> TCM (Maybe ChkTm)
+runProg' m (Ret t) = return (Just (instantiate m t))
+runProg' m (Case ty sc ps) = do
+  ty <- weakChkEval (Ty, instantiate m ty)
+  sc <- weakChkEval (ty, instantiate m sc)
+  runProg m sc ps
 
 data ElimRule = ElimRule
   { targetType :: ChkPa
   , eliminator :: ChkPa
   , elimPremisses :: [Premiss ChkEx Meta]
   , reductType :: ChkEx
-  , betaRules :: [(ChkPa, ChkEx)]
+  , betaRules :: Prog
   , fusionRules :: [(ChkPa, ChkPa, ChkEx)]
   }
   deriving Show
 
+{-
 betaContract :: ElimRule -> SynTm -> Maybe SynTm
 betaContract r (e@(t ::: ty) :$ s) = do
   mtTy <- match (targetType r) ty
@@ -327,6 +347,7 @@ betaContract r (e@(t ::: ty) :$ s) = do
       return (instantiate m rhs ::: rTy)
     _ -> Nothing
 betaContract r _ = Nothing
+-}
 
 data Setup = Setup
   { elimRules :: [ElimRule]
@@ -685,12 +706,11 @@ weakEvalSyn (e :$ s) = do
           [(m, rhs)] -> return (e' :$ instantiate m rhs)
           [] -> return (e :$ s)
           _ -> fail "weakEvalSyn: more than one fusion rule applies"
-      (t ::: _) -> case [ (mt, rhs) | (p, rhs) <- betaRules rule, mt <- trail (match p t) ] of
-        [(mt, rhs)] -> do
-           r <-  weakChkEval (rTy, instantiate (m ++ mt) rhs)
-           return (r ::: rTy)
-        [] -> return (e :$ s)
-        _  -> fail "weakEvalSyn: more than one beta rule applies"
+      (t ::: _) -> runProg m t (betaRules rule) >>= \case
+        Just y -> do
+          r <- weakChkEval (rTy, y)
+          return (r ::: rTy)
+        Nothing -> return (e :$ s)
       _ -> return (e :$ s)
 
 
@@ -830,8 +850,6 @@ normSyn e = do
   (e, t) <- weakEvalSyn e
   normalise (t, upsE e)
 
-
-
 -- Type
 pattern Ty = A "Ty"
 
@@ -844,7 +862,7 @@ piElim = ElimRule
   , eliminator = pm "s"
   , elimPremisses = [[] :- (em "S", "s" :/ B0)]
   , reductType = M ("T" :/ si)
-  , betaRules = [(Lam (pm "t"), M ("t" :/ si))]
+  , betaRules = [(Lam (pm "t"), Ret $ M ("t" :/ si))]
   , fusionRules = []
   }
   where si = B0 :< (em "s" ::: em "S")
@@ -860,7 +878,7 @@ fstElim = ElimRule
   , eliminator = Fst
   , elimPremisses = []
   , reductType = M ("S" :/ B0)
-  , betaRules = [(pm "s" :& pm "t", em "s")]
+  , betaRules = [(pm "s" :& pm "t", Ret $ em "s")]
   , fusionRules = []
   }
 
@@ -869,7 +887,7 @@ sndElim = ElimRule
   , eliminator = Snd
   , elimPremisses = []
   , reductType = M ("T" :/ si)
-  , betaRules = [(pm "s" :& pm "t", em "t")]
+  , betaRules = [(pm "s" :& pm "t", Ret $ em "t")]
   , fusionRules = []
   }
   where si = B0 :< (V 0 :$ Fst)
@@ -896,13 +914,13 @@ listElim = ElimRule
       :- (M ("P" :/ (B0 :< (Cons (E (V 2)) (E (V 1)) ::: List (em "X")))), "c" :/ B0)]
   , reductType = M ("P" :/ (B0 :< V 0))
   , betaRules =
-    [ (Nil, em "n")
-    , (Single (pm "x"),
+    [ (Nil, Ret $ em "n")
+    , (Single (pm "x"), Ret $
        M ("c" :/ (B0
          :< (em "x" ::: em "X")
          :< (Nil ::: List (em "X"))
          :< (em "n" ::: M ("P" :/ (B0 :< (Nil ::: List (em "X"))))))))
-    , (pm "xs" :++: pm "ys",
+    , (pm "xs" :++: pm "ys", Ret $
        E ((em "xs" ::: List (em "X")) :$ ListElim
          (M ("P" :/ (B0 :< ((E (V 0) :++: em "ys") ::: List (em "X")))))
          (E ((em "ys" ::: List (em "X")) :$ ListElim (em "P") (em "n") (em "c")))
@@ -936,10 +954,10 @@ allPElim = ElimRule
     ]
   , reductType = Ty
   , betaRules =
-    [ (Nil, em "Acc")
-    , (Single (pm "x"),
+    [ (Nil, Ret $ em "Acc")
+    , (Single (pm "x"), Ret $
        Sg (M ("P" :/ (B0 :< (em "x" ::: em "X")))) (em "Acc"))
-    , (pm "xs" :++: pm "ys",
+    , (pm "xs" :++: pm "ys", Ret $
        E ((em "xs" ::: List (em "X")) :$ AllP (em "P") (E ((em "ys" ::: List (em "X")) :$ AllP (em "P") (em "Acc")))))
     ]
 
@@ -957,6 +975,15 @@ pattern Nat = List One
 pattern Z = Nil
 pattern S x = Cons Void x
 
+
+instance Num (Chk a) where
+  fromInteger 0 = Z
+  fromInteger n = S (fromInteger (n-1))
+  (+) = error "TODO"
+  (*) = error "TODO"
+  (-) = error "TODO"
+  abs = error "TODO"
+  signum = error "TODO"
 
 -- Thinnings
 
@@ -980,6 +1007,25 @@ pattern Enum as = A "Enum" :& as -- as is a list of Atoms
 pattern EnumElim _P ms = A "EnumElim" :& (B _P) :& ms
 
   -- introduced by a number (less than the length of as), or, also an Atom in the list (optionally paired with a number)
+
+enumElim = ElimRule
+  { targetType = Enum (pm "as")
+  , eliminator = EnumElim (pm "P") (pm "ms")
+  , elimPremisses =
+    [ [("es", Enum (em "as"))] :- (Ty, "P" :/ B0)
+    , [] :- (E ((em "as" ::: List Atom) :$ AllP (em "P") One), "ms" :/ B0)
+    ]
+  , reductType = M ("P" :/ (B0 :< V 0))
+  , betaRules =
+    [ (Z, Ret . E $ (em "ms" ::: E ((em "as" ::: List Atom) :$ AllP (em "P") One)) :$ Fst)
+    , (S (pm "x"), Case (List Atom) (em "as")
+                 [(Cons (pm "a") (pm "as'"), Ret . E $
+                    (em "x" ::: Enum (em "as'")) :$
+                        EnumElim (M ("P" :/ (B0 :< (S (E (V 0)) ::: Enum (em "as")))))
+                               (E ((em "ms" ::: E ((em "as" ::: List Atom) :$ AllP (em "P") One)) :$ Snd)))])
+    ]
+  , fusionRules = []
+  }
 
 {- does not work
 enumElim = ElimRule
@@ -1013,7 +1059,7 @@ data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
 ourSetup = Setup
-  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim]
+  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, enumElim]
   , weakAnalyserSetup = \ x -> case x of
       (Ty, Enum as) -> return $ Just $ WeakAnalysis (I (List Atom, as)) (\ (I as') -> Enum as')
       (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
@@ -1171,6 +1217,14 @@ printSyn (e :$ s) p = do
         _ -> return . (, _T) . paren p (pTarg + 1) $ concat
           [e', " (", show s, ")"]
     List _X -> case s of
+      AllP _P _Acc -> do
+        (p', _P') <- fresh (nomo _X, _X) $ \ x ->
+                     (,) <$> (fst <$> printSyn x 0) <*> chkPrint Ty (_P // x) 0
+        acc <- case _Acc of
+          One -> return ""
+          _ -> ("; " ++) <$> chkPrint Ty _Acc 0
+        let out = "[" ++ _P' ++ " | " ++ p' ++ " <- " ++ e' ++ acc ++ "]"
+        return (out , Ty)
       ListElim _P n c -> do
         fresh ("fun", Pi (List _X) _P) $ \ fun -> do
           (funh, _) <- printSyn fun 0
@@ -1301,7 +1355,13 @@ enumAtoms =
 
 allPabc = (listABC ::: List Atom) :$ enumAtoms :$ AllP (E (predABC :$ E (V 0))) One
 
+allmapfusion = ((xs :-: List (Lam $  S (E (V 0)))) ::: List (Enum listABC)) :$ AllP (E (predABC :$ E (V 0))) One
+  where
+    xs = P [("xs", 0)] (Hide (List (Enum (Cons (A "b") (Cons (A "c") Nil)))))
 
+enumToNat = (Lam (E (V 0 :$ EnumElim Nat (1 :& 2 :& 3 :& Void)))) ::: Pi (Enum listABC) Nat
+
+myEnumToNat = enumToNat :$ A "a"
 
 {-
 TODO
@@ -1309,3 +1369,4 @@ TODO
 2. Additional interesting types (abelian group)
 3. Typechecking
 -}
+

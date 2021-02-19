@@ -1027,22 +1027,6 @@ enumElim = ElimRule
   , fusionRules = []
   }
 
-{- does not work
-enumElim = ElimRule
-  { targetType = Enum (pm "as")
-  , eliminator = EnumElim (pm "P") (pm "ms")
-  , elimPremisses =
-    [ [("es", Enum (em "as"))] :- (Ty, "P" :/ B0)
-    , [] :- (Tuple ((em "as" ::: List Atom) :-: List (Lam (M ("P" :/ (B0 :< V 0))))), "ms" :/ B0)
-    ]
-  , reductType = M ("P" :/ (B0 :< V 0))
-  , betaRules =
-    [ (Z, (em "ms" ::: (Tuple ((em "as" ::: List Atom) :-: List (Lam (M ("P" :/ (B0 :< V 0))))), "ms" :/ B0)) :$ Fst)
-    , (S x, )
-    ]
-  , fusionRules = []
-  }
--}
 
 -- Kit
 

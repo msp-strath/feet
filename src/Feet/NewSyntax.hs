@@ -9,6 +9,7 @@
             , DeriveTraversable
             , LambdaCase
             , TypeFamilies
+            , MultiParamTypeClasses
 #-}
 module Feet.NewSyntax where
 
@@ -76,6 +77,35 @@ infix  1 :::
 upsE :: Syn m -> Chk m
 upsE (t ::: _) = t
 upsE s = E s
+
+data Mangler m f = Mangler
+  { mangV :: Int -> f (Syn m)
+  , mangP :: Name -> HideEq Type -> f (Syn m)
+  , mangM :: m -> f (Chk m)
+  , mangB :: Mangler m f
+  }
+
+class Mangle t where
+  type MangleM t
+  mangle :: Applicative f => Mangler (MangleM t) f -> t -> f t
+
+instance Mangle (Chk m) where
+  type MangleM (Chk m) = m
+  mangle mangler t = case t of
+    A s -> pure (A s)
+    s :& t -> (:&) <$> mangle mangler s <*> mangle mangler t
+    B t -> B <$> mangle (mangB mangler) t
+    E e -> upsE <$> mangle mangler e
+    s :-: t -> (:-:) <$> mangle mangler s <*> mangle mangler t
+    M m -> mangM mangler m
+
+instance Mangle (Syn m) where
+  type MangleM (Syn m) = m
+  mangle mangler e = case e of
+    V i -> mangV mangler i
+    P n ty -> mangP mangler n ty
+    e :$ t -> (:$) <$> mangle mangler e <*> mangle mangler t
+    e ::: t -> (:::) <$> mangle mangler e <*> mangle mangler t
 
 -- the object language
 
@@ -146,6 +176,10 @@ class Thin t where
   (<^>) :: t -> Thinning -> t
   thicken :: Thinning -> t -> Maybe t
 
+instance Thin Void where
+  i <^> th = absurd i
+  thicken th i = absurd i
+
 instance Thin Int where
   i <^> Th th = case (th `mod` 2, th `div` 2) of
     (0, th) -> 1 + (i <^> Th th)
@@ -161,33 +195,29 @@ instance Thin Int where
       ((th, True), 0) -> Just 0
       ((th, True), i) -> (1+) <$> go th (i-1)
 
-instance Thin ChkTm where
-  t <^> th = case t of
-    A a     -> A a
-    t :& t' -> (t <^> th) :& (t' <^> th)
-    B t   -> B (t <^> os th)
-    e :-: s  -> (e <^> th) :-: (s <^> th)
-    M m     -> M m
+instance Thin m => Thin (Chk m) where
+  s <^> th = unI (mangle (thinM th) s)
+  thicken = mangle . thickenM
 
-  thicken th t = case t of
-    A a     -> Just (A a)
-    t :& t' -> (:&) <$> thicken th t <*> thicken th t'
-    B t     -> B <$> thicken (os th) t
-    e :-: s     -> (:-:) <$> thicken th e <*> thicken th s
-    M m     -> Just (M m)
+instance Thin m => Thin (Syn m) where
+  s <^> th = unI (mangle (thinM th) s)
+  thicken = mangle . thickenM
 
-instance Thin SynTm where
-  s <^> th = case s of
-    V i        -> V (i <^> th)
-    P n ty     -> P n ty
-    s :$ t     -> (s <^> th) :$ (t <^> th)
-    (t ::: t') -> (t <^> th) ::: (t' <^> th)
+thinM :: Thin m => Thinning -> Mangler m I
+thinM th = Mangler
+  { mangV = \ i -> pure (V (i <^> th))
+  , mangP = \ n ty -> pure (P n ty)
+  , mangM = \ m -> pure (M (m <^> th))
+  , mangB = thinM (os th)
+  }
 
-  thicken th s = case s of
-    V i        -> V <$> thicken th i
-    P n ty     -> Just (P n ty)
-    s :$ t     -> (:$) <$> thicken th s <*> thicken th t
-    (t ::: t') -> (:::) <$> thicken th t <*> thicken th t'
+thickenM :: Thin m => Thinning -> Mangler m Maybe
+thickenM th = Mangler
+  { mangV = \ i -> (V <$> thicken th i)
+  , mangP = \ n ty -> pure (P n ty)
+  , mangM = \ m -> (M <$> thicken th m)
+  , mangB = thickenM (os th)
+  }
 
 -- pattern matching
 
@@ -270,14 +300,20 @@ class Substitute t where
 (//) :: Substitute t => t -> SynTm -> t
 t // e = substitute (B0 :< e) 0 t
 
-instance Substitute m => Substitute (Chk m) where
-  substitute si i (M m) = M m
-  substitute si i (A a) = A a
-  substitute si i (t :& t') = (substitute si i t :& substitute si i t')
-  substitute si i (B t) = B (substitute si (i+1) t)
-  substitute si i (E e) = upsE (substitute si i e)
-  substitute si i (e :-: s) = (substitute si i e) :-: (substitute si i s)
+substM :: Substitute m => Bwd SynTm -> Int -> Mangler m I
+substM si i = Mangler
+  { mangV = \ j -> let si' = fromi i <> fmap (<^> th) si <> toi 0
+                       fromi k = fromi (k+1) :< V k
+                       toi k = if k >= i then B0 else  toi (k+1) :< V k
+                       th = Th (shiftL (-1) i)
+                   in pure (vacuous (bwdProj si' j))
+  , mangP = \ n ty -> pure (P n ty)
+  , mangM = \ m -> pure (M (substitute si i m))
+  , mangB = substM si (i+1)
+  }
 
+instance Substitute m => Substitute (Chk m) where
+  substitute si i = unI . mangle (substM si i)
 
 instance Substitute Void where
   substitute si i a = a
@@ -289,14 +325,7 @@ instance Substitute Meta where
   substitute si i (m :/ ez) = m :/ fmap (substitute si i) ez
 
 instance Substitute m => Substitute (Syn m) where
-  substitute si i (V j) = vacuous (bwdProj si' j) where
-    si' = fromi i <> fmap (<^> th) si <> toi 0
-    fromi k = fromi (k+1) :< V k
-    toi k = if k >= i then B0 else  toi (k+1) :< V k
-    th = Th (shiftL (-1) i)
-  substitute si i (P n ty) = P n ty
-  substitute si i (s :$ t) = substitute si i s :$ substitute si i t
-  substitute si i (t ::: t') = substitute si i t ::: substitute si i t'
+  substitute si i = unI . mangle (substM si i)
 
 instance (Substitute a, Substitute b) => Substitute (Premiss a b) where
   substitute si i ([] :- x) = [] :- substitute si i x
@@ -304,9 +333,33 @@ instance (Substitute a, Substitute b) => Substitute (Premiss a b) where
     a' = substitute si i a
     ps' :- x' = substitute si (i+1) (ps :- x)
 
-
 data Premiss a b = [(String,a)] :- (a,b) -- types of params, (name and type of s. var)
   deriving Show
+
+class Abstract t where
+  abstract :: Name -> Int -> t -> t
+
+
+abstractM :: Abstract m => Name -> Int -> Mangler m I
+abstractM n i = Mangler
+  { mangV = \ i -> pure (V i)
+  , mangP = \ n' ty -> if n == n' then pure (V i) else pure (P n' ty)
+  , mangM = \ m -> pure (M (abstract n i m))
+  , mangB = abstractM n (i + 1)
+  }
+
+(\\) :: Abstract t => Name -> t -> t
+n \\ x = abstract n 0 x
+
+instance Abstract Void where
+  abstract n i t = absurd t
+
+instance Abstract m => Abstract (Syn m) where
+  abstract n i = unI . mangle (abstractM n i)
+
+instance Abstract m => Abstract (Chk m) where
+  abstract n i = unI . mangle (abstractM n i)
+
 
 data Prog' = Ret ChkEx
            | Case ChkEx ChkEx Prog -- type, scrutinee, cases
@@ -523,11 +576,20 @@ weakAdapt ((e :-: a) ::: _) mid b tgt = do
   ab <- adapterSemicolon src a mid b tgt
   weakAdapt e src ab tgt
 weakAdapt e src Idapter tgt = return (upsE e)
+weakAdapt (t ::: _) (List src) (Hom f) (List tgt) = case t of
+  Nil -> return Nil
+  Single x -> weakChkEval (tgt, E ((f ::: Pi src (List tgt)) :$ x))
+  (xs :++: ys) -> (:++:) <$> rec xs <*> rec ys
+    where rec z = weakAdapt (z ::: List src) (List src) (Hom f) (List tgt)
+weakAdapt e (List src) (List f) (List tgt) =
+  weakAdapt e (List src) (Hom (Lam (E ((f ::: Pi src (List tgt)) :$ Single (E (V 0)))))) (List tgt)
+{-
 weakAdapt (t ::: _) (List src) (List f) (List tgt) = case t of
   Nil -> return Nil
   Single x -> Single <$> weakChkEval (tgt, E ((f ::: Pi src tgt) :$ x))
   (xs :++: ys) -> (:++:) <$> rec xs <*> rec ys
     where rec z = weakAdapt (z ::: List src) (List src) (List f) (List tgt)
+-}
 weakAdapt e inn@(Thinning src ga de) (Thinning f th ph) out@(Thinning tgt ga' de') = do
   -- f : src -> tgt
   -- th : thinning from ga' -> List f ga
@@ -574,6 +636,12 @@ weakEvalAdapter (Thinning src ga de) (Thinning f th ph) (Thinning tgt ga' de') =
 adapterSemicolon :: ChkTm -> Adapter -> ChkTm -> Adapter -> ChkTm -> TCM Adapter
 adapterSemicolon src Idapter mid b tgt = return b
 adapterSemicolon src a mid Idapter tgt = return a
+adapterSemicolon (List src) (Hom a) (List mid) b (List tgt) = do
+  let ab = Lam $ ((a ::: Pi src (List mid)) :$ E (V 0)) :-: b
+  weakEvalAdapter (List src) (Hom ab) (List tgt)
+adapterSemicolon (List src) (List a) (List mid) (Hom b) (List tgt) = do
+  let ab = Lam $ E ((b ::: Pi mid (List tgt)) :$ E ((a ::: Pi src mid) :$ E (V 0)))
+  weakEvalAdapter (List src) (Hom ab) (List tgt)
 adapterSemicolon (List src) (List a) (List mid) (List b) (List tgt) = do
   let ab = Lam $ E ((b ::: Pi mid tgt) :$ E ((a ::: Pi src mid) :$ E (V 0)))
   weakEvalAdapter (List src) (List ab) (List tgt)
@@ -691,18 +759,6 @@ reconstructThinningAdapterTarget src@(Thinning _W ga0 de0) a _X de = do
       (ga, _) <- weakChkThinning _X ph lfga0
       return (ga, Thinning _X ga de)
 
-
-{-
-    case src of
-      Thinning _W ga0 de0 -> -}
-
-
-
-{-
-      do
-       ga <- weakChkEval (List _X, ga)
-
--}
 
 {-
 We cannot have the eta law that every thinning th : xs -> xs is the
@@ -854,8 +910,17 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
 
   quad :: ChkTm -> Adapter -> ChkTm -> TCM Adapter
   quad src Idapter tgt = return Idapter
+  quad (List src) (Hom f) (List tgt) = do
+    isMap <- fresh ("x", src) $ \ x@(P n ty) -> go (List tgt, E ((f ::: Pi src (List tgt)) :$ E x)) >>= \case
+      Single t -> return (Just (Lam (n \\ t)))
+      _ -> return Nothing
+    case isMap of
+      Just g -> quad (List src) (List g) (List tgt)
+      Nothing -> do
+        f' <- go (Pi src (List tgt), f)
+        return (Hom f')
   quad (List src) (List f) (List tgt) = do
-    eq <-mandy (checkEquality Ty src tgt) (checkEquality (Pi src tgt) f (Lam (E (V 0))))
+    eq <- mandy (checkEquality Ty src tgt) (checkEquality (Pi src tgt) f (Lam (E (V 0))))
     if eq then return Idapter else do
       f' <- go (Pi src tgt, f)
       return (List f')
@@ -946,6 +1011,8 @@ pattern (:++:) xs ys = A "append" :& xs :& ys
 pattern Cons x xs = Single x :++: xs
 pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
 
+pattern Hom f = A "hom" :& f
+
 listElim = ElimRule
   { targetType = List (pm "X")
   , eliminator = ListElim (pm "P") (pm "n") (pm "c")
@@ -974,6 +1041,14 @@ listElim = ElimRule
             :< ((em "f" ::: Pi (em "W") (em "X")) :$ E (V 2))
             :< ((V 1 :-: List (em "f")) ::: List (em "X"))
             :< V 0))))
+    , (List (pm "W"), Hom (pm "f"), ListElim (M ("P" :/ (B0 :< ((V 0 :-: Hom (em "f")) ::: List (em "X"))))) (em "n")
+        (E ((em "f" ::: Pi (em "W") (List (em "X"))) :$ E (V 2) :$
+             ListElim (M ("P" :/ (B0 :< ((E (V 0) :++: (V 2 :-: Hom (em "f")) ::: List (em "X"))))))
+                      (E (V 0))
+                      (M ("c" :/ (B0
+                         :< V 2
+                         :< ((E (V 1) :++: (V 4 :-: Hom (em "f"))) ::: List (em "X"))
+                         :< V 0))))))
     ]
   }
 
@@ -1082,6 +1157,10 @@ pattern Inv x = A "Inv" :& x
 
 newtype I x = I { unI :: x }
   deriving (Functor, Foldable, Traversable)
+
+instance Applicative I where
+  pure = I
+  I f <*> I a = I (f a)
 
 newtype K a x = K { unK :: a }
   deriving (Functor, Foldable, Traversable)
@@ -1197,10 +1276,14 @@ chkPrint (List _X) xs p = blat <$> munch xs where
   munch (Single x) = (\ s -> (s, False, "")) <$> chkPrint _X x pElt
   munch (xs :++: ys) = glom <$> munch xs <*> munch ys
   munch (E e) = (\ (s, _) -> ("", False, s)) <$> printSyn e pArg
-  munch (e :-: List f) = do
-    (s, _S) <- printSyn e pArg
-    f <- chkPrint (Pi _S (List _X)) f pArg
-    return $ ("", True, concat ["List ", f, " ", s])
+  munch (e :-: List f) = printSyn e pArg >>= \case
+    (s, List _S) -> do
+      f <- chkPrint (Pi _S _X) f pArg
+      return $ ("", True, concat ["List ", f, " ", s])
+  munch (e :-: Hom f) = printSyn e pArg >>= \case
+    (s, List _S) -> do
+      f <- chkPrint (Pi _S (List _X)) f pArg
+      return $ ("", True, concat [f , " =<< ", s])
   munch x = return $ ("", True, show x)
   brk s = concat ["[", s, "]"]
   glom ("", _, "") ys = ys
@@ -1428,6 +1511,10 @@ myEnumToNat = enumToNat :$ A "a"
 myG = FAb (Enum listABC)
 
 myGelt = Inv (Eta (A "b")) :.: E (P [("x", 0)] (Hide myG)) :.: Eta (A "a") :.: Inv (E (P [("x", 0)] (Hide myG)))
+
+stuttering = (Lam $ (V 0 :-: Hom (Lam $ (Single (E (V 0)) :++: Single (E (V 0)))))) ::: Pi (List Atom) (List (Atom))
+
+idObfuscated = (Lam $ (V 0 :-: Hom (Lam $ Single ((E (V 0))) :++: Nil))) ::: Pi (List Atom) (List Atom)
 
 {-
 TODO

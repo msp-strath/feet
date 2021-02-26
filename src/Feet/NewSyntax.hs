@@ -15,6 +15,8 @@ module Feet.NewSyntax where
 import Data.Void
 import Data.Bits
 
+import qualified Data.Map as Map
+
 import Control.Applicative
 import Control.Monad
 import Control.Arrow
@@ -414,6 +416,17 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
 --weakChkEval x | trace ("chk: " ++ show x) False = undefined
+weakChkEval (FAb _X, x) = do
+  _X <- weakChkEval (Ty, _X)
+  Map.foldrWithKey folder FOne <$> chkFAb _X x
+ where
+ folder x n xs = case compare n 0 of
+   LT -> smartmul (Inv x) (folder x (n+1) xs)
+   EQ -> xs
+   GT -> smartmul x (folder x (n-1) xs)
+ smartmul x FOne = x
+ smartmul FOne y = y
+ smartmul x y = x :.: y
 weakChkEval (List _X, xs) = case xs of
   Nil -> return Nil
   Single x -> return $ Single x
@@ -449,6 +462,29 @@ weakChkEval x = do
         a <- weakEvalAdapter src a tgt
         weakAdapt e src a tgt
       x         -> return (snd x)
+
+-- type is assumed weak head normalised
+chkFAb :: Type -> ChkTm -> TCM (Map.Map ChkTm Integer)
+chkFAb _X x = case x of
+  Eta x -> do
+    x <- normalise (_X, x)
+    return (Map.singleton (Eta x) 1)
+  FOne -> return Map.empty
+  x :.: y -> do
+    xm <- chkFAb _X x
+    ym <- chkFAb _X y
+    return (Map.unionWith (+) xm ym)
+  Inv x -> do
+    xm <- chkFAb _X x
+    return (Map.map negate xm)
+  (e :-: Idapter) -> do
+    (e, ty) <- weakEvalSyn e
+    case e of
+      (t ::: _) -> chkFAb _X t
+      e -> do
+        (e, _) <- normStop e
+        return (Map.singleton (upsE e) 1)
+  x -> error (show x)
 
 weakFind :: ChkTm -> ChkTm -> TCM (Either (ChkTm -> ChkTm, ChkTm) ChkTm)
 weakFind as x = weakChkEval (List Atom, as) >>= \case
@@ -713,9 +749,11 @@ weakEvalSyn (e :$ s) = do
         Nothing -> return (e :$ s)
       _ -> return (e :$ s)
 
+normalise = fst normalisers
+normStop  = snd normalisers
 
-normalise :: (Type, ChkTm) -> TCM ChkTm
-normalise = refresh "n" . go where
+normalisers :: ((Type, ChkTm) -> TCM ChkTm, SynTm -> TCM (SynTm, Type))
+normalisers = (refresh "n" . go, refresh "n" . stop) where
   go (Ty, e) = weakChkEval (Ty, e) >>= \case
     Ty -> return Ty
     Atom -> return Atom
@@ -739,6 +777,9 @@ normalise = refresh "n" . go where
       ga' <- go (List _X, ga)
       de' <- go (List _X, de)
       return (Thinning _X' ga' de')
+    FAb _X -> do
+      _X' <- go (Ty, _X)
+      return (FAb _X')
     e :-: a -> do
       (e', src) <- stop e
       a' <- quad src a Ty
@@ -784,6 +825,7 @@ normalise = refresh "n" . go where
     th <- weakChkEval (ty, th)
     de <- weakChkEval (List _X, de)
     snd <$> quoth _X th de
+  go (FAb _X, x) = weakChkEval (FAb _X, x)
   go (E ty, E e) = do -- only canonical types have non-Idapter adapters
     (e, _) <- weakEvalSyn e
     (e', _) <- stop e
@@ -1027,6 +1069,14 @@ enumElim = ElimRule
   , fusionRules = []
   }
 
+-- Free Abelian groups
+
+pattern FAb _X = A "FAb" :& _X
+pattern Eta x = A "Eta" :& x
+pattern FOne = A "1"
+pattern (:.:) x y = A "*" :& x :& y
+pattern Inv x = A "Inv" :& x
+
 
 -- Kit
 
@@ -1092,6 +1142,9 @@ chkPrint Ty _T p = case _T of
   List _X -> do
     _X' <- chkPrint Ty _X pArg
     return . paren p pArg $ concat ["List ", _X']
+  FAb _X -> do
+    _X' <- chkPrint Ty _X pArg
+    return . paren p pArg $ concat ["FAb ", _X']
   Thinning _X ga de -> do
     _X' <- chkPrint Ty _X 0
     ga' <- chkPrint (List _X) ga pScope
@@ -1160,6 +1213,31 @@ chkPrint (List _X) xs p = blat <$> munch xs where
   blat (xs, _, "") = "[" ++ xs ++ "]"
   blat ("", b, ys) = (if b then paren p pArg else id) ys
   blat (xs, _ ,  ys) = paren p pArg $ concat ["[", xs, "] ++ ", ys]
+chkPrint (FAb _X) xs p = blat <$> munch xs True where
+  munch :: ChkTm -> Bool -> TCM (String, Bool, String)
+  munch FOne _ = return ("", False, "")
+  munch (Eta x) b = (\ s -> (s ++ (if b then "" else "^"), False, "")) <$> chkPrint _X x pElt
+  munch (Inv xs) b = munch xs (not b)
+  munch (xs :.: ys) b = glom <$> munch xs b <*> munch ys b
+  munch (E e) b = (\ (s, _) -> ("", False, if b then s else "(" ++ s ++ ")^")) <$> printSyn e pArg
+{-
+  munch (e :-: List f) = do
+    (s, _S) <- printSyn e pArg
+    f <- chkPrint (Pi _S (List _X)) f pArg
+    return $ ("", True, concat ["List ", f, " ", s])
+-}
+  munch x b = return $ ("", True, if b then show x else "(" ++ show x ++ ")^")
+  brk s = concat ["[", s, "]"]
+  glom ("", _, "") ys = ys
+  glom xs ("", _, "") = xs
+  glom (xs, _, "") ("", b, ys) = (xs, b, ys)
+  glom (xs, _, "") (ys, b, zs) = (xs ++ ", " ++ ys, b, zs)
+  glom ("", _, xs) ("", _, zs) = ("", True, xs ++ " * " ++ zs)
+  glom (ws, _, xs) ("", _, zs) = (ws, True, concat [xs, " * ", zs])
+  glom (ws, _, xs) (ys, _, zs) = (ws, True, concat [xs, " * [", ys, "] * ", zs])
+  blat (xs, _, "") = "[" ++ xs ++ "]"
+  blat ("", b, ys) = (if b then paren p pArg else id) ys
+  blat (xs, _ ,  ys) = paren p pArg $ concat ["[", xs, "] * ", ys]
 chkPrint (Thinning _X ga de) th p = munch th where
   munch :: ChkTm -> TCM String
   munch Nil = return $ "."
@@ -1346,6 +1424,10 @@ allmapfusion = ((xs :-: List (Lam $  S (E (V 0)))) ::: List (Enum listABC)) :$ A
 enumToNat = (Lam (E (V 0 :$ EnumElim Nat (1 :& 2 :& 3 :& Void)))) ::: Pi (Enum listABC) Nat
 
 myEnumToNat = enumToNat :$ A "a"
+
+myG = FAb (Enum listABC)
+
+myGelt = Inv (Eta (A "b")) :.: E (P [("x", 0)] (Hide myG)) :.: Eta (A "a") :.: Inv (E (P [("x", 0)] (Hide myG)))
 
 {-
 TODO

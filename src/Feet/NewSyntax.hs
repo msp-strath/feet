@@ -27,6 +27,9 @@ import Utils.Bwd
 
 import Debug.Trace
 
+track = trace
+
+
 data Chk
   m -- what's the meta
   = A String       -- atoms
@@ -468,7 +471,7 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
---weakChkEval x | trace ("chk: " ++ show x) False = undefined
+weakChkEval x | track ("chk: " ++ show x) False = undefined
 weakChkEval (FAb _X, x) = do
   _X <- weakChkEval (Ty, _X)
   Map.foldrWithKey folder FOne <$> chkFAb _X x
@@ -494,11 +497,15 @@ weakChkEval (List _X, xs) = case xs of
   e :-: a ->  do
     (e, src) <- weakEvalSyn e
     weakAdapt e src a (List _X)
+weakChkEval (AllT _X _P xs, ps) = do
+  xs <- weakChkEval (List _X, xs)
+  (ps, leftovers) <- chkAll _X _P xs ps
+  demandEquality (List _X) leftovers Nil --this should never fail
+  return ps
 weakChkEval (Enum as, x) = do
   weakFind as x >>= \case
     Right t -> return t
     Left _ -> fail ("out of bounds as = " ++ show as ++ " x = " ++ show x)
-
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
   (ga', th) <- weakChkThinning _X th de
@@ -512,9 +519,51 @@ weakChkEval x = do
       (ty, E e) -> upsE <$> (fst <$> weakEvalSyn e)
       (tgt, e :-: a) -> do
         (e, src) <- weakEvalSyn e
-        a <- weakEvalAdapter src a tgt
+        -- a <- weakEvalAdapter src a tgt
         weakAdapt e src a tgt
       x         -> return (snd x)
+
+chkAll :: Type -> ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm) -- (evaled ps, leftovers)
+chkAll _X _P xs ps = case ps of
+  Nil -> return (Nil, xs)
+  Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+    Cons x xs -> do
+      _P <- weakChkEval (Ty, _P // (x ::: _X))
+      p <- weakChkEval (_P, p)
+      return (p, xs)
+  ps :++: qs -> do
+    (ps, xs) <- chkAll _X _P xs ps
+    (qs, xs) <- chkAll _X _P xs qs
+    return (ps ++++ qs, xs)
+  (e :-: AllT f g th) -> weakEvalSyn e >>= \case
+    (e, AllT _W _R ws) -> _
+    -- We have th : Thinning _W (xs' :-: List f) ws
+    -- for xs' a prefix of xs whose suffix we must compute.
+    -- We can compute the little end of th, and then compute unprefix modulo map
+  (e :-: Idapter) -> weakEvalSyn e >>= \case
+    (e, AllT _X' _P' xs') -> do
+      -- demandEquality Ty _X _X' --this should never fail
+      leftovers <- unprefix _X xs xs'
+      return (upsE e, leftovers)
+      where
+        unprefix :: Type -> ChkTm -> ChkTm -> TCM ChkTm
+        unprefix _X xs xs' = weakChkEval (List _X, xs') >>= \case
+          Nil -> return xs
+          Single x' -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+            Cons x xs -> do
+              demandEquality _X x x'
+              return xs
+          xs' :++: ys' -> do
+            xs <- unprefix _X xs xs'
+            unprefix _X xs ys'
+          e' -> weakChkEval (List _X, xs) >>= \case
+            xs :++: ys -> do
+              xs <- unprefix _X xs e'
+              return (xs ++++ ys)
+            e -> do -- must be neutral
+              demandEquality (List _X) e e'
+              return Nil
+
 
 -- type is assumed weak head normalised
 chkFAb :: Type -> ChkTm -> TCM (Map.Map ChkTm Integer)
@@ -570,7 +619,7 @@ weakFind as x = weakChkEval (List Atom, as) >>= \case
 
 -- assumes types are in whnf and V-closed
 weakAdapt :: SynTm -> ChkTm -> Adapter -> ChkTm -> TCM ChkTm
---weakAdapt e src a tgt | trace ("weakAdapt: e = " ++ show e ++ " ; src = " ++ show src ++ " a = " ++ show a ++ " tgt = " ++ show tgt ++ "\n") False = undefined
+weakAdapt e src a tgt | track ("weakAdapt: e = " ++ show e ++ " ; src = " ++ show src ++ " a = " ++ show a ++ " tgt = " ++ show tgt ++ "\n") False = undefined
 weakAdapt ((e :-: a) ::: _) mid b tgt = do
   (e , src) <- weakEvalSyn e
   ab <- adapterSemicolon src a mid b tgt
@@ -581,25 +630,42 @@ weakAdapt (t ::: _) (List src) (Hom f) (List tgt) = case t of
   Single x -> weakChkEval (tgt, E ((f ::: Pi src (List tgt)) :$ x))
   (xs :++: ys) -> (:++:) <$> rec xs <*> rec ys
     where rec z = weakAdapt (z ::: List src) (List src) (Hom f) (List tgt)
+{-
 weakAdapt e (List src) (List f) (List tgt) =
   weakAdapt e (List src) (Hom (Lam (E ((f ::: Pi src (List tgt)) :$ Single (E (V 0)))))) (List tgt)
-{-
+-}
 weakAdapt (t ::: _) (List src) (List f) (List tgt) = case t of
   Nil -> return Nil
   Single x -> Single <$> weakChkEval (tgt, E ((f ::: Pi src tgt) :$ x))
   (xs :++: ys) -> (:++:) <$> rec xs <*> rec ys
     where rec z = weakAdapt (z ::: List src) (List src) (List f) (List tgt)
--}
+
 weakAdapt e inn@(Thinning src ga de) (Thinning f th ph) out@(Thinning tgt ga' de') = do
   -- f : src -> tgt
   -- th : thinning from ga' -> List f ga
   -- ph : thinning from List f de -> de'
-  lf <- weakEvalAdapter (List src) (List f) (List tgt)
+  let lf = List f
+  -- lf <- weakEvalAdapter (List src) (List f) (List tgt)
   t <- weakAdapt e inn lf out
   weakChkEval (out, ThSemi (ThSemi th t) ph)
 weakAdapt e inn@(Thinning src ga de) (List f) out@(Thinning tgt ga' de') = case e of
   (t ::: _) -> mapThin src f tgt t
   e         -> return (e :-: List f)
+weakAdapt e (AllT _X _P xs) (AllT f g th) (AllT _Y _Q Nil) = return Nil
+weakAdapt (t ::: _) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) = case consView t of
+-- f : _Y -> _X
+-- g : (y : _Y) -> _P (f y) -> Q y
+-- th : Thinning _X (List f ys) xs
+  Nil -> return ((Nil ::: AllT _X _P xs) :-: AllT f g th)  -- don't like this, but best we can do
+  Cons p ps -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+    Cons x xs -> (consThView <$> weakChkEval (Thinning _X ((ys ::: List _Y) :-: List f) (Cons x xs), th)) >>= \case
+      Cons Th0 th -> weakAdapt (ps ::: AllT _X _P xs) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys)
+      Cons Th1 th -> (consView <$> weakChkEval (List _Y, ys)) >>= \case
+        Cons y ys -> do
+          let q = (g ::: Pi _Y (Pi (_P // ((f ::: Pi _Y _X) :$ E (V 0))) (_Q <^> o' mempty))) :$ y :$ p
+          qs <- weakAdapt (ps ::: AllT _X _P xs) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys)
+          return (Cons (upsE q) qs)
+      th -> return ((Cons p ps ::: AllT _X _P (Cons x xs)) :-: AllT f g th) -- or this; should have an eliminator that gets stuck here instead
 weakAdapt e src a tgt = return (e :-: a)
 
 mapThin :: ChkTm -> ChkTm -> ChkTm -> ChkTm -> TCM ChkTm
@@ -615,9 +681,10 @@ mapThin mid f tgt (e :-: a) = do
       af <- adapterSemicolon (List src) a (List mid) (List f) (List tgt)
       return (e :-: af)
 
+{-
 -- returns Idapter when possible
 weakEvalAdapter :: ChkTm -> Adapter -> ChkTm -> TCM Adapter
---weakEvalAdapter src a tgt | trace ("weakEvalAdapter: src = " ++ show src ++ " a = " ++ show a ++ " tgt = " ++ show tgt ++ "\n") False = undefined
+--weakEvalAdapter src a tgt | track ("weakEvalAdapter: src = " ++ show src ++ " a = " ++ show a ++ " tgt = " ++ show tgt ++ "\n") False = undefined
 weakEvalAdapter src Idapter tgt = return Idapter
 weakEvalAdapter (List src) (List f) (List tgt) = do
   eq <-mandy (checkEquality Ty src tgt) (checkEquality (Pi src tgt) f (Lam (E (V 0))))
@@ -631,6 +698,7 @@ weakEvalAdapter (Thinning src ga de) (Thinning f th ph) (Thinning tgt ga' de') =
   if isNormalIdThinning th && isNormalIdThinning ph
     then weakEvalAdapter (List src) (List f) (List tgt)
     else return (Thinning f th ph)
+-}
 
 -- all arguments assumed to be in whnf, and V-closed
 adapterSemicolon :: ChkTm -> Adapter -> ChkTm -> Adapter -> ChkTm -> TCM Adapter
@@ -638,18 +706,32 @@ adapterSemicolon src Idapter mid b tgt = return b
 adapterSemicolon src a mid Idapter tgt = return a
 adapterSemicolon (List src) (Hom a) (List mid) b (List tgt) = do
   let ab = Lam $ ((a ::: Pi src (List mid)) :$ E (V 0)) :-: b
-  weakEvalAdapter (List src) (Hom ab) (List tgt)
+  return (Hom ab)
+  -- weakEvalAdapter (List src) (Hom ab) (List tgt)
 adapterSemicolon (List src) (List a) (List mid) (Hom b) (List tgt) = do
   let ab = Lam $ E ((b ::: Pi mid (List tgt)) :$ E ((a ::: Pi src mid) :$ E (V 0)))
-  weakEvalAdapter (List src) (Hom ab) (List tgt)
+  return (Hom ab)
+  -- weakEvalAdapter (List src) (Hom ab) (List tgt)
 adapterSemicolon (List src) (List a) (List mid) (List b) (List tgt) = do
   let ab = Lam $ E ((b ::: Pi mid tgt) :$ E ((a ::: Pi src mid) :$ E (V 0)))
-  weakEvalAdapter (List src) (List ab) (List tgt)
+  return (List ab)
+  -- weakEvalAdapter (List src) (List ab) (List tgt)
 adapterSemicolon inn@(Thinning src ga0 de0) a (Thinning mid ga1 de1) b out@(Thinning tgt ga2 de2) = do
   let (fa, tha, pha) = expandThinAdapter a
   let (fb, thb, phb) = expandThinAdapter b
   let fab = Lam $ E ((fb ::: Pi mid tgt) :$ E ((fa ::: Pi src mid) :$ E (V 0)))
-  weakEvalAdapter inn (Thinning fab (ThSemi thb tha) (ThSemi pha phb)) out
+  return (Thinning fab (ThSemi thb tha) (ThSemi pha phb))
+  -- weakEvalAdapter inn (Thinning fab (ThSemi thb tha) (ThSemi pha phb)) out
+adapterSemicolon inn@(AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) (AllT f' g' ph) (AllT _Z _R zs) = do
+  let fr = f ::: Pi _Y _X
+  let gr = g ::: Pi _Y (Pi (_P // (fr :$ E (V 0))) (_Q <^> o' mempty))
+  let f'r = f' ::: Pi _Z _Y
+  let g'r = g' ::: Pi _Z (Pi (_Q // (f'r :$ E (V 0))) (_R <^> o' mempty))
+  let ff' = Lam $ E (fr :$ E (f'r :$ E (V 0)))
+  let gg' = Lam $ Lam $ E (g'r :$ E (V 1) :$ E (gr :$ E (f'r :$ E (V 1))) :$ E (V 0))
+  let pha = (ph ::: Thinning _Y ((zs ::: List _Z) :-: List f') ys) :-: List f -- Thinning _X (zs :-: List f';f) (ys :-: List f)
+  let phath = ThSemi pha th
+  return (AllT ff' gg' phath)
 
 expandThinAdapter :: Adapter -> (ChkTm, ChkTm, ChkTm)
 expandThinAdapter Idapter = (Lam (E (V 0)), Th1, Th1)
@@ -677,6 +759,12 @@ isNormalIdThinning Nil           = True
 isNormalIdThinning Th1           = True
 isNormalIdThinning (Cons Th1 th) = isNormalIdThinning th
 isNormalIdThinning _             = False
+
+consThView :: ChkTm -> ChkTm
+consThView Th0 = Cons Th0 Th0
+consThView Th1 = Cons Th1 Th1
+consThView th = th
+
 
 -- assumes argument is head normal
 consView :: ChkTm -> ChkTm
@@ -741,7 +829,7 @@ weakChkThinning _X th de = case th of
     (e, src) <- weakEvalSyn e
     th <- etaThinning e src
     (ga, tgt) <- reconstructThinningAdapterTarget src a _X de
-    a <- weakEvalAdapter src a tgt
+    -- a <- weakEvalAdapter src a tgt
     t <- weakAdapt (th ::: src) src a tgt
     return (ga, t)
 
@@ -779,7 +867,7 @@ the context.
 
 -- Ensures that the type is head normalised
 weakEvalSyn :: SynTm -> TCM (SynTm, Type)
---weakEvalSyn x | trace ("syn: " ++ show x ++ "\n") False = undefined
+weakEvalSyn x | track ("syn: " ++ show x ++ "\n") False = undefined
 weakEvalSyn (V i) = fail "weakEvalSyn applied to non-closed term"
 weakEvalSyn (P n ty) = return (P n ty, unHide ty)
 weakEvalSyn (t ::: ty) = do
@@ -828,6 +916,11 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
     List s -> do
       s' <- go (Ty, s)
       return (List s')
+    AllT _X _P xs -> do
+      _X' <- go (Ty, _X)
+      _P' <- fresh ("x", _X) $ \ x -> go (Ty, _P // x)
+      xs' <- go (List _X, xs)
+      return (AllT _X' _P' xs')
     Thinning _X ga de -> do
       _X' <- go (Ty, _X)
       ga' <- go (List _X, ga)
@@ -865,17 +958,20 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
     weakChkEval (List _X, e) >>= \case
       Nil -> return Nil
       Single x -> Single <$> go (_X, x)
-      xs :++: ys -> do
-        xs' <- go (List _X, xs)
-        ys' <- go (List _X, ys)
-        let tidy Nil bs = bs
-            tidy as Nil = as
-            tidy (as :++: bs) cs = tidy as (tidy bs cs)
-            tidy as bs = as :++: bs
-        return $ tidy xs' ys'
+      xs :++: ys -> (++++) <$> go (List _X, xs) <*> go (List _X, ys)
       e :-: a -> do
         (e', src) <- stop e
         a' <- quad src a (List _X)
+        return (e' :-: a')
+  go (AllT _X _P xs, ps) = consView <$> weakChkEval (List _X, xs) >>= \case
+    Nil -> return Nil
+    Cons x xs ->
+      Cons <$> go (_P // (x ::: _X), E ((((ps ::: AllT _X _P xs) :-: AllT (Lam $ E (V 0)) (Lam (Lam $ E (V 0))) (Cons Th1 Th0)) ::: AllT _X _P (Single x)) :$ Only))
+           <*> go (AllT _X _P xs, (ps ::: AllT _X _P xs) :-: AllT (Lam $ E (V 0)) (Lam (Lam $ E (V 0))) (Cons Th0 Th1))
+    _ -> weakChkEval (AllT _X _P xs, ps) >>= \case
+      e :-: a -> do
+        (e', src) <- stop e
+        a' <- quad src a (AllT _X _P xs)
         return (e' :-: a')
   go (ty@(Thinning _X ga de), th) = do
     th <- weakChkEval (ty, th)
@@ -925,6 +1021,25 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
       f' <- go (Pi src tgt, f)
       return (List f')
   quad (Thinning src ga de) (List f) (Thinning tgt ga' de') = quad (List src) (List f) (List tgt)
+  quad (Thinning src ga de) (Thinning f th ph) (Thinning tgt ga' de') = do
+    lfga <- weakChkEval (List tgt, (ga ::: List src) :-: List f)
+    lfde <- weakChkEval (List tgt, (de ::: List src) :-: List f)
+    th <- weakChkEval (Thinning tgt ga' lfga, th)
+    ph <- weakChkEval (Thinning tgt lfde de', ph)
+    if isNormalIdThinning th && isNormalIdThinning ph
+      then quad (List src) (List f) (List tgt)
+      else return (Thinning f th ph)
+  quad (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) = do
+    eq <- mandy (mandy (checkEquality Ty _Y _X) (checkEquality (Pi _Y _X) f (Lam (E (V 0)))))
+                (mandy (fresh ("y", _Y) $ \ y -> checkEquality Ty (_P // y) (_Q // y))
+                       (checkEquality (Pi _Y (Pi _P (_Q <^> o' mempty))) g (Lam $ Lam (E (V 0)))))
+    eqTh <- checkEquality (List _X) xs ((ys ::: List _Y) :-: List f) -- if so, th must be id
+    if eqTh && eq then return Idapter
+      else do
+        f' <- go (Pi _Y _X, f)
+        g' <- go (Pi _Y (Pi (_P // ((f ::: Pi _Y _X) :$ (E (V 0)))) (_Q <^> o' mempty)), g)
+        th' <- if eqTh then return Th1 else snd <$> quoth _X th xs
+        return (AllT f' g' th')
 
   stop :: SynTm -> TCM (SynTm, Type)
   stop (V i) = error "normalise: applied to non-closed term"
@@ -1013,6 +1128,14 @@ pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
 
 pattern Hom f = A "hom" :& f
 
+infixr 4 :++:, ++++
+
+(++++) :: ChkTm -> ChkTm -> ChkTm
+Nil ++++ bs = bs
+as ++++ Nil = as
+(as :++: bs) ++++ cs =  as ++++ (bs ++++ cs)
+as ++++ bs = as :++: bs
+
 listElim = ElimRule
   { targetType = List (pm "X")
   , eliminator = ListElim (pm "P") (pm "n") (pm "c")
@@ -1054,8 +1177,30 @@ listElim = ElimRule
 
 -- Predicate lifting of List
 
-pattern AllP _P _Acc = A "All" :& (B _P) :& _Acc
+pattern AllT _X _P xs = A "All" :& _X :& (B _P) :& xs
 -- constructors overloaded Nil, Single, :++:
+
+pattern Only = A "only"
+
+onlyElim = ElimRule
+  { targetType = AllT (pm "X") (pm "P") (Single (pm "x"))
+  , eliminator = Only
+  , elimPremisses = []
+  , reductType = M ("P" :/ (B0 :< (em "x" ::: em "X")))
+  , betaRules =
+    [ (Single (pm "p"), Ret $ em "p")
+    ]
+  , fusionRules =
+    [ (AllT (pm "Y") (pm "Q") (pm "ys"), AllT (pm "f") (pm "g") (pm "th"),
+       E ((em "g" ::: Pi (em "X") (Pi (M ("Q" :/ (B0 :< ((em "f" ::: Pi (em "X") (em "Y")) :$ em "x")))) (M ("P" :/ (B0 :< V 1))))) :$ em "x" :$ E (V 0 :$ Only)))
+    ]
+  }
+
+
+-- what would happen if we defined All : (List Type) -> Type instead of AllT?
+-- (AllT X P xs = All (map P xs) ; All Xs = AllT Type (\ x -> x) Xs )
+
+pattern AllP _P _Acc = A "All" :& (B _P) :& _Acc
 
 -- for now, we compute it recursively. In the long run, to take
 -- advantage of structure (eg naturality of selection, that it is a
@@ -1172,9 +1317,10 @@ data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
 ourSetup = Setup
-  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, enumElim]
+  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, enumElim, onlyElim]
   , weakAnalyserSetup = \ x -> case x of
       (Ty, Enum as) -> return $ Just $ WeakAnalysis (I (List Atom, as)) (\ (I as') -> Enum as')
+      (Ty, AllT _X _P xs) -> return $ Just $ WeakAnalysis (I (Ty, _X) :*: I (List _X, xs)) (\ (I _X' :*: I xs') -> AllT _X' _P xs')
       (Ty, Pi s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Pi s' t)
       (Ty, Sg s t) -> return $ Just $ WeakAnalysis (I (Ty, s)) (\ (I s') -> Sg s' t)
       (Sg s t, x :& y) -> do
@@ -1224,6 +1370,12 @@ chkPrint Ty _T p = case _T of
   FAb _X -> do
     _X' <- chkPrint Ty _X pArg
     return . paren p pArg $ concat ["FAb ", _X']
+  AllT _X _P xs -> do
+    _X' <- chkPrint Ty _X 0
+    (v, _P') <- fresh (nomo _X, _X) $ \ x ->
+      (,) <$> (fst <$> printSyn x 0) <*> chkPrint Ty (_P // x) 0
+    xs' <- chkPrint (List _X) xs pScope
+    return $ "[" ++ _P' ++ " | (" ++ v ++ " : " ++ _X' ++ ") <- " ++ xs' ++ "]"
   Thinning _X ga de -> do
     _X' <- chkPrint Ty _X 0
     ga' <- chkPrint (List _X) ga pScope
@@ -1515,6 +1667,13 @@ myGelt = Inv (Eta (A "b")) :.: E (P [("x", 0)] (Hide myG)) :.: Eta (A "a") :.: I
 stuttering = (Lam $ (V 0 :-: Hom (Lam $ (Single (E (V 0)) :++: Single (E (V 0)))))) ::: Pi (List Atom) (List (Atom))
 
 idObfuscated = (Lam $ (V 0 :-: Hom (Lam $ Single ((E (V 0))) :++: Nil))) ::: Pi (List Atom) (List Atom)
+
+youarehereTy = Pi Ty (Pi (List (E (V 0))) (AllT (E (V 1)) (Thinning (E (V 2)) (Single (E (V 0))) (E (V 1))) (E (V 0))))
+
+youarehere = Lam {-X-} . Lam {-xs-} . E $ V 0 :$
+  ListElim (AllT (E (V 1)) (Thinning (E (V 2)) (Single (E (V 0))) (E (V 1))) (E (V 0)))
+           Nil
+           (Lam . Lam . Lam $ Cons (Cons Th1 Th0) (V 0 :-: AllT (Lam (E (V 0))) (Lam . Lam $ Cons Th0 (E (V 0))) Th1))
 
 {-
 TODO

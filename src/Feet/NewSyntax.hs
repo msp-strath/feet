@@ -523,8 +523,50 @@ weakChkEval x = do
         weakAdapt e src a tgt
       x         -> return (snd x)
 
+
+-- f : _Y -> _X
+-- g : (y : _Y) -> _P (f y) -> Q y
+-- th : Thinning _X (List f ys) xs
+-- ps : AllT _X _P xs' for some xs' s.t. xs = xs' ++ xs''
+---------------------------------------------------------
+-- Returns ((qs, ps''), (xs'', th'', ys'')) where
+--   ps = ps' ++ ps''
+--   qs : AllT _Y _Q ys' for some ys' s.t. ys = ys' ++ ys''
+--   th = th' ++ th''  for some th' : Thinning _X (List f ys') xs', th'' : Thinning _X (List f ys'') xs''
+--   qs = ps' mapped by g, selected by th'
+chkAll :: (Type, ChkTm, Type) -> (ChkTm, ChkTm, ChkTm) -> (ChkTm, ChkTm, ChkTm) -> ChkTm -> TCM ((ChkTm, ChkTm), (ChkTm, ChkTm, ChkTm))
+chkAll ff@(_X, f, _Y) gg@(_P , g, _Q) thth@(xs, th, ys) ps = case ps of
+    (e :-: a) = weakEvalSyn e >>= \case
+      (e, AllT _W _O ws) -> adapterSemicolon (AllT _W _O ws) a (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) >>= \case
+        AllT f g th -> do
+          ((qs, os), thth) <- synAll e (_W, f, _Y) (_O, g, _Q) (ws, th, ys)
+          _
+          -- need to sort out bureaucracy of how to get stuck more effectively
+    Nil -> return ((Nil, Nil), (xs, th, ys))
+    Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+      Cons x xs -> (consThView <$> weakChkEval (Thinning _X ((ys ::: List _Y) :-: List f) (Cons x xs), th)) >>= \case
+        Cons Th0 th -> return ((Nil, Nil), (xs, th, ys))
+        Cons Th1 th -> (consView <$> weakChkEval (List _Y, ys)) >>= \case
+          Cons y ys -> do
+            let q = (g ::: Pi _Y (Pi (_P // ((f ::: Pi _Y _X) :$ E (V 0))) (_Q <^> o' mempty))) :$ y :$ p
+            return ((Single q, Nil), (xs, th, ys))
+        th -> return ((Nil, Single p), thth)
+    ps :++: ps' -> do
+      ((qs, ps), (xs, th, ys)) <- chkAll ff gg (xs, th, ys) ps
+      case ps of
+        Nil -> do
+          ((qs', ps'), (xs, th, ys)) <- chkAll ff gg (xs, th, ys) ps'
+          return ((qs ++++ qs', ps'), (xs, th, ys))
+        _ -> return ((qs, ps ++++ ps'), (xs, th, ys))
+
+-- e is head normal
+synAll :: SynTm -> (Type, ChkTm, Type) -> (ChkTm, ChkTm, ChkTm) -> (ChkTm, ChkTm, ChkTm) -> TCM ((ChkTm,ChkTm), (ChkTm, ChkTm, ChkTm))
+synAll (t ::: _) ff gg thth = chkAll t ff gg thth
+synAll e ff gg thth = return ((Nil, E e), thth)
+
+{-
 chkAll :: Type -> ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm) -- (evaled ps, leftovers)
-chkAll _X _P xs ps = case ps of
+chkAll _X _P xs ps a = case ps of
   Nil -> return (Nil, xs)
   Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
     Cons x xs -> do
@@ -536,10 +578,12 @@ chkAll _X _P xs ps = case ps of
     (qs, xs) <- chkAll _X _P xs qs
     return (ps ++++ qs, xs)
   (e :-: AllT f g th) -> weakEvalSyn e >>= \case
-    (e, AllT _W _R ws) -> _
+    (e, AllT _W _R ws) -> do
     -- We have th : Thinning _W (xs' :-: List f) ws
     -- for xs' a prefix of xs whose suffix we must compute.
-    -- We can compute the little end of th, and then compute unprefix modulo map
+      ws <- weakChkEval (List _W, ws)
+      (ws', th) <- weakChkThinning _W th ws
+
   (e :-: Idapter) -> weakEvalSyn e >>= \case
     (e, AllT _X' _P' xs') -> do
       -- demandEquality Ty _X _X' --this should never fail
@@ -563,7 +607,7 @@ chkAll _X _P xs ps = case ps of
             e -> do -- must be neutral
               demandEquality (List _X) e e'
               return Nil
-
+-}
 
 -- type is assumed weak head normalised
 chkFAb :: Type -> ChkTm -> TCM (Map.Map ChkTm Integer)
@@ -653,9 +697,9 @@ weakAdapt e inn@(Thinning src ga de) (List f) out@(Thinning tgt ga' de') = case 
   e         -> return (e :-: List f)
 weakAdapt e (AllT _X _P xs) (AllT f g th) (AllT _Y _Q Nil) = return Nil
 weakAdapt (t ::: _) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) = case consView t of
--- f : _Y -> _X
--- g : (y : _Y) -> _P (f y) -> Q y
--- th : Thinning _X (List f ys) xs
+  -- f : _Y -> _X
+  -- g : (y : _Y) -> _P (f y) -> Q y
+  -- th : Thinning _X (List f ys) xs
   Nil -> return ((Nil ::: AllT _X _P xs) :-: AllT f g th)  -- don't like this, but best we can do
   Cons p ps -> (consView <$> weakChkEval (List _X, xs)) >>= \case
     Cons x xs -> (consThView <$> weakChkEval (Thinning _X ((ys ::: List _Y) :-: List f) (Cons x xs), th)) >>= \case

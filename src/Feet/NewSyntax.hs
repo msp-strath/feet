@@ -524,6 +524,57 @@ weakChkEval x = do
       x         -> return (snd x)
 
 
+-- Given xs, xs' : List _X such that xs = xs' ++ xs'', computes xs''
+unprefix :: Type -> ChkTm -> ChkTm -> TCM ChkTm
+unprefix _X xs xs' = weakChkEval (List _X, xs') >>= \case
+  Nil -> return xs
+  Single x' -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+    Cons x xs -> do
+      demandEquality _X x x'
+      return xs
+  xs' :++: ys' -> do
+    xs <- unprefix _X xs xs'
+    unprefix _X xs ys'
+  e' -> weakChkEval (List _X, xs) >>= \case
+    xs :++: ys -> do
+      xs <- unprefix _X xs e'
+      return (xs ++++ ys)
+    e -> do -- must be neutral
+      demandEquality (List _X) e e'
+      return Nil
+
+-- Given type Thinning _X xs ys, th of that type, and ys' a prefix of ys
+-- Returns ((xs', xs''), (ys0, ys1, ys''), (th', th''))
+-- s.t.:
+--   xs = xs' ++ xs''
+--   ys = ys' ++ ys''
+--   ys' = ys0 ++ ys1
+--   th'  : Thinning _X xs' ys0
+--   th'' : Thinning _X xs'' (ys1 ++ ys'')
+--   th = th' ++ th''
+-- for minimal ys1
+thunprefix :: Type -> ChkTm -> ChkTm -> TCM ((ChkTm, ChkTm),(ChkTm, ChkTm, ChkTm), (ChkTm, ChkTm))
+thunprefix (Thinning _X xs ys) th ys' = (consView <$> weakChkEval (List _X, ys')) >>= \case
+  Nil -> return ((Nil, xs), (Nil, Nil, ys), (NoThin, th))
+  Cons y ys' -> (consView <$> weakChkEval (List _X, ys)) >>= \case
+    Cons _ ys -> (consThView <$> weakChkEval (Thinning _X xs ys, th)) >>= \case
+      Cons Th0 th -> do
+        ((xs', xs''), (ys0, ys1, ys''), (th', th'')) <- thunprefix (Thinning _X xs ys) th ys'
+        return ((xs', xs''), (Cons y ys0, ys1, ys''), (Cons Th0 th', th''))
+      Cons Th1 th -> (consView <$> weakChkEval (List _X, ys)) >>= \case
+        Cons x xs -> do
+          ((xs', xs''), (ys0, ys1, ys''), (th', th'')) <- thunprefix (Thinning _X xs ys) th ys'
+          return ((Cons x xs', xs''), (Cons y ys0, ys1, ys''), (Cons Th1 th', th''))
+      th -> do
+        ys'' <- unprefix _X ys ys'
+        return ((Nil, xs), (Nil,Cons y ys', ys''), (NoThin, th))
+  ys' -> do
+    ys'' <- unprefix _X ys ys'
+    return ((Nil, xs), (Nil, ys', ys''), (NoThin, th))
+
+
+
+{-
 -- f : _Y -> _X
 -- g : (y : _Y) -> _P (f y) -> Q y
 -- th : Thinning _X (List f ys) xs
@@ -536,12 +587,18 @@ weakChkEval x = do
 --   qs = ps' mapped by g, selected by th'
 chkAll :: (Type, ChkTm, Type) -> (ChkTm, ChkTm, ChkTm) -> (ChkTm, ChkTm, ChkTm) -> ChkTm -> TCM ((ChkTm, ChkTm), (ChkTm, ChkTm, ChkTm))
 chkAll ff@(_X, f, _Y) gg@(_P , g, _Q) thth@(xs, th, ys) ps = case ps of
-    (e :-: a) = weakEvalSyn e >>= \case
+    (e :-: a) -> weakEvalSyn e >>= \case
+      (e, AllT _W _O ws) -> case a of
+        Idapter -> synAll e ff gg thth
+        AllT h k ph -> do
+          ((ps, os), phph) <- synAll e (_W , h, _X) (_O, k, _P) (ws, ph, xs)
+          undefined
+{-
       (e, AllT _W _O ws) -> adapterSemicolon (AllT _W _O ws) a (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) >>= \case
         AllT f g th -> do
           ((qs, os), thth) <- synAll e (_W, f, _Y) (_O, g, _Q) (ws, th, ys)
-          _
-          -- need to sort out bureaucracy of how to get stuck more effectively
+-}
+
     Nil -> return ((Nil, Nil), (xs, th, ys))
     Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
       Cons x xs -> (consThView <$> weakChkEval (Thinning _X ((ys ::: List _Y) :-: List f) (Cons x xs), th)) >>= \case
@@ -563,16 +620,43 @@ chkAll ff@(_X, f, _Y) gg@(_P , g, _Q) thth@(xs, th, ys) ps = case ps of
 synAll :: SynTm -> (Type, ChkTm, Type) -> (ChkTm, ChkTm, ChkTm) -> (ChkTm, ChkTm, ChkTm) -> TCM ((ChkTm,ChkTm), (ChkTm, ChkTm, ChkTm))
 synAll (t ::: _) ff gg thth = chkAll t ff gg thth
 synAll e ff gg thth = return ((Nil, E e), thth)
+-}
 
-{-
+-- f : _X -> _W
+-- xs = xs' ++ xs''
+-- ws' = List f xs'
+-- Returns (xs', xs'')
+unmapprefix :: Type -> ChkTm -> Type -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
+unmapprefix _X f _W xs ws' = weakChkEval (List _W, ws') >>= \case
+  Nil -> return (Nil, xs)
+  Single _ -> (consView <$> weakChkEval (List _X, xs)) >>= \case
+    Cons x xs -> return (Single x, xs)
+  ws0 :++: ws1 -> do
+    (xs0', xs) <- unmapprefix _X f _W xs ws0
+    (xs1', xs'') <- unmapprefix _X f _W xs ws1
+    return (xs0' ++++ xs1', xs'')
+  (e :-: a) -> helper xs
+  where
+    helper xs = weakChkEval (List _X, xs) >>= \case
+      xs0 :++: xs1 -> do
+        (xs0', xs0'') <- helper xs0
+        return (xs0', xs0'' ++++ xs1)
+      xs -> return (xs, Nil) -- here xs must be stuck (because ws' is), hence match the stuck ws'
+
+
+-- returns (ps', xs'') where ps' = evaled ps
+-- xs = xs' ++ xs''
+-- ps' : AllT _X _P xs'
 chkAll :: Type -> ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm) -- (evaled ps, leftovers)
-chkAll _X _P xs ps a = case ps of
+chkAll _X _P xs ps | track ("chkAll: xs = " ++ show xs ++ " ps = " ++ show ps ++ "\n") False = undefined
+chkAll _X _P xs ps = case ps of
   Nil -> return (Nil, xs)
   Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
     Cons x xs -> do
       _P <- weakChkEval (Ty, _P // (x ::: _X))
       p <- weakChkEval (_P, p)
       return (p, xs)
+    xs -> error $ show xs
   ps :++: qs -> do
     (ps, xs) <- chkAll _X _P xs ps
     (qs, xs) <- chkAll _X _P xs qs
@@ -583,32 +667,15 @@ chkAll _X _P xs ps a = case ps of
     -- for xs' a prefix of xs whose suffix we must compute.
       ws <- weakChkEval (List _W, ws)
       (ws', th) <- weakChkThinning _W th ws
-
+      (xs', xs'') <- unmapprefix _X f _W xs ws'
+      ps' <- weakAdapt e (AllT _W _R ws) (AllT f g th) (AllT _X _P xs')
+      return (ps', xs'')
   (e :-: Idapter) -> weakEvalSyn e >>= \case
     (e, AllT _X' _P' xs') -> do
       -- demandEquality Ty _X _X' --this should never fail
       leftovers <- unprefix _X xs xs'
       return (upsE e, leftovers)
-      where
-        unprefix :: Type -> ChkTm -> ChkTm -> TCM ChkTm
-        unprefix _X xs xs' = weakChkEval (List _X, xs') >>= \case
-          Nil -> return xs
-          Single x' -> (consView <$> weakChkEval (List _X, xs)) >>= \case
-            Cons x xs -> do
-              demandEquality _X x x'
-              return xs
-          xs' :++: ys' -> do
-            xs <- unprefix _X xs xs'
-            unprefix _X xs ys'
-          e' -> weakChkEval (List _X, xs) >>= \case
-            xs :++: ys -> do
-              xs <- unprefix _X xs e'
-              return (xs ++++ ys)
-            e -> do -- must be neutral
-              demandEquality (List _X) e e'
-              return Nil
--}
-
+  
 -- type is assumed weak head normalised
 chkFAb :: Type -> ChkTm -> TCM (Map.Map ChkTm Integer)
 chkFAb _X x = case x of
@@ -820,6 +887,7 @@ consView xs = xs
 -- de is head normal
 -- returns (origin, evaled thinning)
 weakChkThinning :: ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
+weakChkThinning _X th de | track ("weakChkThinning: th = " ++ show th ++ " de = " ++ show de ++ "\n") False = undefined
 weakChkThinning _X th de = case th of
   Th1 -> case consView de of
     Nil -> return (Nil, NoThin)
@@ -837,6 +905,7 @@ weakChkThinning _X th de = case th of
       de <- weakChkEval (List _X, de)
       (ga, th) <- weakChkThinning _X th de
       return (Cons x ga, Cons Th1 th)
+    de -> error $ "de = " ++ show de ++ " th = " ++ show th
   Cons Th0 th -> case consView de of
     Cons x de -> do
       de <- weakChkEval (List _X, de)
@@ -1009,9 +1078,9 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
         return (e' :-: a')
   go (AllT _X _P xs, ps) = consView <$> weakChkEval (List _X, xs) >>= \case
     Nil -> return Nil
-    Cons x xs ->
+    Cons x xs' ->
       Cons <$> go (_P // (x ::: _X), E ((((ps ::: AllT _X _P xs) :-: AllT (Lam $ E (V 0)) (Lam (Lam $ E (V 0))) (Cons Th1 Th0)) ::: AllT _X _P (Single x)) :$ Only))
-           <*> go (AllT _X _P xs, (ps ::: AllT _X _P xs) :-: AllT (Lam $ E (V 0)) (Lam (Lam $ E (V 0))) (Cons Th0 Th1))
+           <*> go (AllT _X _P xs', (ps ::: AllT _X _P xs) :-: AllT (Lam $ E (V 0)) (Lam (Lam $ E (V 0))) (Cons Th0 Th1))
     _ -> weakChkEval (AllT _X _P xs, ps) >>= \case
       e :-: a -> do
         (e', src) <- stop e
@@ -1108,7 +1177,7 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
     return (e' :$ instantiate m' (eliminator rule), rTy)
 
   prem :: Premiss ChkTm ChkTm -> TCM ChkTm
-  prem ([] :- p) = go p
+  prem ([] :- p) | track ("prem: " ++ show p) True = go p
   prem (((y, ty):hs) :- p) = fresh (y, ty) $ \ y -> prem ((hs :- p) // y)
 
 normSyn :: SynTm -> TCM ChkTm
@@ -1714,10 +1783,14 @@ idObfuscated = (Lam $ (V 0 :-: Hom (Lam $ Single ((E (V 0))) :++: Nil))) ::: Pi 
 
 youarehereTy = Pi Ty (Pi (List (E (V 0))) (AllT (E (V 1)) (Thinning (E (V 2)) (Single (E (V 0))) (E (V 1))) (E (V 0))))
 
+
+-- something goes wrong running this
 youarehere = Lam {-X-} . Lam {-xs-} . E $ V 0 :$
-  ListElim (AllT (E (V 1)) (Thinning (E (V 2)) (Single (E (V 0))) (E (V 1))) (E (V 0)))
+  ListElim (AllT (E (V 2)) (Thinning (E (V 3)) (Single (E (V 0))) (E (V 0))) (E (V 0)))
            Nil
-           (Lam . Lam . Lam $ Cons (Cons Th1 Th0) (V 0 :-: AllT (Lam (E (V 0))) (Lam . Lam $ Cons Th0 (E (V 0))) Th1))
+           (Cons (Cons Th1 Th0) (V 0 :-: AllT (Lam (E (V 0))) (Lam . Lam $ Cons Th0 (E (V 0))) Th1))
+
+
 
 {-
 TODO

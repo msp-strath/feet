@@ -1785,10 +1785,10 @@ youarehereTy = Pi Ty (Pi (List (E (V 0))) (AllT (E (V 1)) (Thinning (E (V 2)) (S
 
 
 -- something goes wrong running this
-youarehere = Lam {-X-} . Lam {-xs-} . E $ V 0 :$
-  ListElim (AllT (E (V 2)) (Thinning (E (V 3)) (Single (E (V 0))) (E (V 0))) (E (V 0)))
+youarehere = Lam {-X-} . Lam {-xs-} . E $ V {-xs-} 0 :$
+  ListElim ({-xs'.-} AllT (E (V {-X-} 2)) ({-x.-}Thinning (E (V {-X-} 3)) (Single (E (V {-x-} 0))) (E (V {-xs'-} 1))) (E (V {-xs'-} 0)))
            Nil
-           (Cons (Cons Th1 Th0) (V 0 :-: AllT (Lam (E (V 0))) (Lam . Lam $ Cons Th0 (E (V 0))) Th1))
+           ({-x, xs', ih.-} Cons (Cons Th1 Th0) (V {-ih-} 0 :-: AllT (Lam {-y-} (E (V {-y-} 0))) (Lam {-y-} . Lam {-th-} $ Cons Th0 (E (V {-th-} 0))) Th1))
 
 
 

@@ -1563,6 +1563,47 @@ chkPrint (List _X) xs p = blat <$> munch xs where
   blat (xs, _, "") = "[" ++ xs ++ "]"
   blat ("", b, ys) = (if b then paren p pArg else id) ys
   blat (xs, _ ,  ys) = paren p pArg $ concat ["[", xs, "] ++ ", ys]
+chkPrint (AllT _X _Q xs) qs p = (blat . snd) <$> munch xs qs where
+  munch :: ChkTm -> ChkTm -> TCM (ChkTm, (String, Bool, String))
+  munch xs Nil = return (xs, ("", False, ""))
+  munch xs (Single q) = do
+    xs <- weakChkEval (List _X, xs)
+    case consView xs of
+      Cons x xs -> (\ s -> (xs, (s, False, ""))) <$> chkPrint (_Q // (x ::: _X)) q pElt
+  munch xs (qs :++: rs) = do
+    (xs, pqs) <- munch xs qs
+    (xs, prs) <- munch xs rs
+    return (xs, glom pqs prs)
+  munch xs (e :-: Idapter) = printSyn e pArg >>= \case
+    (e, AllT _X' _P' xs') -> do
+      leftovers <- unprefix _X xs xs'
+      return (leftovers, (e, False, ""))
+  munch xs (e :-:  AllT f g th) = printSyn e pArg >>= \case
+    (s, AllT _W _R ws) -> do
+    -- f : _W -> _X
+    -- g : (w : _W) -> _Q (f w) -> R w
+    -- th : Thinning _X ws' ws
+    ws <- weakChkEval (List _W, ws)
+    (ws', th) <- weakChkThinning _W th ws
+    (_, xs'') <- unmapprefix _X f _W xs ws'
+
+    g <- chkPrint (Pi _W (Pi (_Q // ((f ::: Pi _W _X) :$ E (V 0))) (_R <^> o' mempty))) g pArg
+    f <- chkPrint (Pi _W _X) f pArg
+    th <- chkPrint (Thinning _W ws' ws) th pArg
+
+    return (xs'', ("", True, concat ["All ", f, " ", g, " ", th, " ", s]))
+  munch xs qs = return $ (xs, ("", True, show qs))
+  brk s = concat ["[", s, "]"]
+  glom ("", _, "") ys = ys
+  glom xs ("", _, "") = xs
+  glom (xs, _, "") ("", b, ys) = (xs, b, ys)
+  glom (xs, _, "") (ys, b, zs) = (xs ++ ", " ++ ys, b, zs)
+  glom ("", _, xs) ("", _, zs) = ("", True, xs ++ " ++ " ++ zs)
+  glom (ws, _, xs) ("", _, zs) = (ws, True, concat [xs, " ++ ", zs])
+  glom (ws, _, xs) (ys, _, zs) = (ws, True, concat [xs, " ++ [", ys, "] ++ ", zs])
+  blat (xs, _, "") = "[" ++ xs ++ "]"
+  blat ("", b, ys) = (if b then paren p pArg else id) ys
+  blat (xs, _ ,  ys) = paren p pArg $ concat ["[", xs, "] ++ ", ys]
 chkPrint (FAb _X) xs p = blat <$> munch xs True where
   munch :: ChkTm -> Bool -> TCM (String, Bool, String)
   munch FOne _ = return ("", False, "")

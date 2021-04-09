@@ -945,6 +945,7 @@ pattern Enum as = A "Enum" :& as -- as is a list of Atoms
 
 pattern EnumElim _P ms = A "EnumElim" :& (B _P) :& ms
 
+
   -- introduced by a number (less than the length of as), or, also an Atom in the list (optionally paired with a number)
 
 {- does not work

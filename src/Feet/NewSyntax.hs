@@ -27,7 +27,9 @@ import Utils.Bwd
 
 import Debug.Trace
 
-track = trace
+-- track = trace
+track = tracko
+tracko x = id
 
 
 data Chk
@@ -471,7 +473,7 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
-weakChkEval x | track ("chk: " ++ show x) False = undefined
+weakChkEval x | track ("chk:\n   " ++ show x) False = undefined
 weakChkEval (FAb _X, x) = do
   _X <- weakChkEval (Ty, _X)
   Map.foldrWithKey folder FOne <$> chkFAb _X x
@@ -648,14 +650,14 @@ unmapprefix _X f _W xs ws' = weakChkEval (List _W, ws') >>= \case
 -- xs = xs' ++ xs''
 -- ps' : AllT _X _P xs'
 chkAll :: Type -> ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm) -- (evaled ps, leftovers)
-chkAll _X _P xs ps | track ("chkAll: xs = " ++ show xs ++ " ps = " ++ show ps ++ "\n") False = undefined
+chkAll _X _P xs ps | track ("chkAll:\n   xs = " ++ show xs ++ "\n   ps = " ++ show ps ++ "\n") False = undefined
 chkAll _X _P xs ps = case ps of
   Nil -> return (Nil, xs)
   Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
     Cons x xs -> do
       _P <- weakChkEval (Ty, _P // (x ::: _X))
       p <- weakChkEval (_P, p)
-      return (p, xs)
+      return (Single p, xs)
     xs -> error $ show xs
   ps :++: qs -> do
     (ps, xs) <- chkAll _X _P xs ps
@@ -675,7 +677,7 @@ chkAll _X _P xs ps = case ps of
       -- demandEquality Ty _X _X' --this should never fail
       leftovers <- unprefix _X xs xs'
       return (upsE e, leftovers)
-  
+
 -- type is assumed weak head normalised
 chkFAb :: Type -> ChkTm -> TCM (Map.Map ChkTm Integer)
 chkFAb _X x = case x of
@@ -730,7 +732,7 @@ weakFind as x = weakChkEval (List Atom, as) >>= \case
 
 -- assumes types are in whnf and V-closed
 weakAdapt :: SynTm -> ChkTm -> Adapter -> ChkTm -> TCM ChkTm
-weakAdapt e src a tgt | track ("weakAdapt: e = " ++ show e ++ " ; src = " ++ show src ++ " a = " ++ show a ++ " tgt = " ++ show tgt ++ "\n") False = undefined
+weakAdapt e src a tgt | track ("weakAdapt:\n   e = " ++ show e ++ "\n   src = " ++ show src ++ "\n   a = " ++ show a ++ "\n   tgt = " ++ show tgt ++ "\n") False = undefined
 weakAdapt ((e :-: a) ::: _) mid b tgt = do
   (e , src) <- weakEvalSyn e
   ab <- adapterSemicolon src a mid b tgt
@@ -839,7 +841,7 @@ adapterSemicolon inn@(AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) (AllT f' g' p
   let f'r = f' ::: Pi _Z _Y
   let g'r = g' ::: Pi _Z (Pi (_Q // (f'r :$ E (V 0))) (_R <^> o' mempty))
   let ff' = Lam $ E (fr :$ E (f'r :$ E (V 0)))
-  let gg' = Lam $ Lam $ E (g'r :$ E (V 1) :$ E (gr :$ E (f'r :$ E (V 1))) :$ E (V 0))
+  let gg' = Lam $ Lam $ E (g'r :$ E (V 1) :$ E ((gr :$ E (f'r :$ E (V 1))) :$ E (V 0)))
   let pha = (ph ::: Thinning _Y ((zs ::: List _Z) :-: List f') ys) :-: List f -- Thinning _X (zs :-: List f';f) (ys :-: List f)
   let phath = ThSemi pha th
   return (AllT ff' gg' phath)
@@ -858,12 +860,12 @@ expandTh0 _X de = do
     ys -> return Th0
 
 etaThinning :: SynTm -> ChkTm -> TCM ChkTm
+etaThinning e src | track ("etaThinning:\n   e = " ++ show e ++ "\n   src = " ++ show src) False = undefined
 etaThinning e (Thinning _W ga0 de0) = do
   ga0 <- weakChkEval (List _W, ga0)
   case ga0 of
     Nil -> expandTh0 _W de0
     _   -> return (upsE e)
-
 
 isNormalIdThinning :: ChkTm -> Bool
 isNormalIdThinning Nil           = True
@@ -887,7 +889,7 @@ consView xs = xs
 -- de is head normal
 -- returns (origin, evaled thinning)
 weakChkThinning :: ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
-weakChkThinning _X th de | track ("weakChkThinning: th = " ++ show th ++ " de = " ++ show de ++ "\n") False = undefined
+weakChkThinning _X th de | track ("weakChkThinning:\n   th = " ++ show th ++ "\n   de = " ++ show de ++ "\n") False = undefined
 weakChkThinning _X th de = case th of
   Th1 -> case consView de of
     Nil -> return (Nil, NoThin)
@@ -980,7 +982,7 @@ the context.
 
 -- Ensures that the type is head normalised
 weakEvalSyn :: SynTm -> TCM (SynTm, Type)
-weakEvalSyn x | track ("syn: " ++ show x ++ "\n") False = undefined
+weakEvalSyn x | track ("syn:\n   " ++ show x ++ "\n") False = undefined
 weakEvalSyn (V i) = fail "weakEvalSyn applied to non-closed term"
 weakEvalSyn (P n ty) = return (P n ty, unHide ty)
 weakEvalSyn (t ::: ty) = do
@@ -1177,7 +1179,7 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
     return (e' :$ instantiate m' (eliminator rule), rTy)
 
   prem :: Premiss ChkTm ChkTm -> TCM ChkTm
-  prem ([] :- p) | track ("prem: " ++ show p) True = go p
+  prem ([] :- p) | track ("prem:\n   " ++ show p) True = go p
   prem (((y, ty):hs) :- p) = fresh (y, ty) $ \ y -> prem ((hs :- p) // y)
 
 normSyn :: SynTm -> TCM ChkTm
@@ -1783,14 +1785,12 @@ idObfuscated = (Lam $ (V 0 :-: Hom (Lam $ Single ((E (V 0))) :++: Nil))) ::: Pi 
 
 youarehereTy = Pi Ty (Pi (List (E (V 0))) (AllT (E (V 1)) (Thinning (E (V 2)) (Single (E (V 0))) (E (V 1))) (E (V 0))))
 
-
--- something goes wrong running this
 youarehere = Lam {-X-} . Lam {-xs-} . E $ V {-xs-} 0 :$
   ListElim ({-xs'.-} AllT (E (V {-X-} 2)) ({-x.-}Thinning (E (V {-X-} 3)) (Single (E (V {-x-} 0))) (E (V {-xs'-} 1))) (E (V {-xs'-} 0)))
            Nil
            ({-x, xs', ih.-} Cons (Cons Th1 Th0) (V {-ih-} 0 :-: AllT (Lam {-y-} (E (V {-y-} 0))) (Lam {-y-} . Lam {-th-} $ Cons Th0 (E (V {-th-} 0))) Th1))
 
-
+youarehereApplied = (youarehere ::: youarehereTy) :$ Atom :$ listABC
 
 {-
 TODO

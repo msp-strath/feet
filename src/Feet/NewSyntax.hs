@@ -762,7 +762,7 @@ weakAdapt e inn@(Thinning src ga de) (Thinning f th ph) out@(Thinning tgt ga' de
   -- ph : thinning from List f de -> de'
   let lf = List f
   -- lf <- weakEvalAdapter (List src) (List f) (List tgt)
-  t <- weakAdapt e inn lf out
+  t <- weakAdapt e inn lf (Thinning tgt ((ga ::: List src) :-: lf) ((de ::: List src) :-: lf))
   weakChkEval (out, ThSemi (ThSemi th t) ph)
 weakAdapt e inn@(Thinning src ga de) (List f) out@(Thinning tgt ga' de') = case e of
   (t ::: _) -> mapThin src f tgt t

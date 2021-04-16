@@ -508,6 +508,7 @@ weakChkEval (Enum as, x) = do
     Left _ -> fail ("out of bounds as = " ++ show as ++ " x = " ++ show x)
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
+  th <- track ("weakChkEval calls weakChkThinning with " ++ show th) $ return th
   (ga', th) <- weakChkThinning _X th de
   -- demandEquality (List _X) ga ga' --this should never fail
   return th
@@ -655,7 +656,7 @@ chkAll _X _P xs ps = case ps of
     Cons x xs -> do
       _P <- weakChkEval (Ty, _P // (x ::: _X))
       p <- weakChkEval (_P, p)
-      return (p, xs)
+      return (Single p, xs)
     xs -> error $ show xs
   ps :++: qs -> do
     (ps, xs) <- chkAll _X _P xs ps
@@ -666,6 +667,7 @@ chkAll _X _P xs ps = case ps of
     -- We have th : Thinning _W (xs' :-: List f) ws
     -- for xs' a prefix of xs whose suffix we must compute.
       ws <- weakChkEval (List _W, ws)
+      th <- track ("chkAll calling weakChkThinning " ++ show th) $ return th
       (ws', th) <- weakChkThinning _W th ws
       (xs', xs'') <- unmapprefix _X f _W xs ws'
       ps' <- weakAdapt e (AllT _W _R ws) (AllT f g th) (AllT _X _P xs')
@@ -839,7 +841,7 @@ adapterSemicolon inn@(AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) (AllT f' g' p
   let f'r = f' ::: Pi _Z _Y
   let g'r = g' ::: Pi _Z (Pi (_Q // (f'r :$ E (V 0))) (_R <^> o' mempty))
   let ff' = Lam $ E (fr :$ E (f'r :$ E (V 0)))
-  let gg' = Lam $ Lam $ E (g'r :$ E (V 1) :$ E (gr :$ E (f'r :$ E (V 1))) :$ E (V 0))
+  let gg' = Lam $ Lam $ E (g'r :$ E (V 1) :$ E ((gr :$ E (f'r :$ E (V 1))) :$ E (V 0)))
   let pha = (ph ::: Thinning _Y ((zs ::: List _Z) :-: List f') ys) :-: List f -- Thinning _X (zs :-: List f';f) (ys :-: List f)
   let phath = ThSemi pha th
   return (AllT ff' gg' phath)
@@ -863,6 +865,7 @@ etaThinning e (Thinning _W ga0 de0) = do
   case ga0 of
     Nil -> expandTh0 _W de0
     _   -> return (upsE e)
+etaThinning e ty = error ("etaThinning called with " ++ show e ++ " and type " ++ show ty)
 
 
 isNormalIdThinning :: ChkTm -> Bool
@@ -957,6 +960,7 @@ reconstructThinningAdapterTarget src@(Thinning _W ga0 de0) a _X de = do
       return (ga, Thinning _X ga de)
     Thinning f ph ps -> do
       lfga0 <- weakChkEval (List _X, (ga0 ::: List _W) :-: List f)
+      ph <- track ("reconstructThAdTa calls weakChkThinning " ++ show ph) $ return ph
       (ga, _) <- weakChkThinning _X ph lfga0
       return (ga, Thinning _X ga de)
 

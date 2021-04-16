@@ -474,7 +474,7 @@ eliminate ty s = TCM $ \ setup ns -> case [ (mTy ++ melim, rule) | rule <- elimR
 
 -- Assuming type is already head normalised
 weakChkEval :: (Type, ChkTm) -> TCM ChkTm
-weakChkEval x | track ("chk:\n   " ++ show x) False = undefined
+weakChkEval (ty, t) | track ("chk:\n   " ++ fugly ty ++ " :> " ++ fugly t) False = undefined
 weakChkEval (FAb _X, x) = do
   _X <- weakChkEval (Ty, _X)
   Map.foldrWithKey folder FOne <$> chkFAb _X x
@@ -511,7 +511,7 @@ weakChkEval (Enum as, x) = do
     Left _ -> fail ("out of bounds as = " ++ show as ++ " x = " ++ show x)
 weakChkEval (Thinning _X ga de, th) = do
   de <- weakChkEval (List _X, de)
-  th <- track ("weakChkEval calls weakChkThinning with " ++ show th) $ return th
+  th <- track ("weakChkEval calls weakChkThinning with " ++ fugly th) $ return th
   (ga', th) <- weakChkThinning _X th de
   -- demandEquality (List _X) ga ga' --this should never fail
   return th
@@ -652,7 +652,7 @@ unmapprefix _X f _W xs ws' = weakChkEval (List _W, ws') >>= \case
 -- xs = xs' ++ xs''
 -- ps' : AllT _X _P xs'
 chkAll :: Type -> ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm) -- (evaled ps, leftovers)
-chkAll _X _P xs ps | track ("chkAll:\n   xs = " ++ show xs ++ "\n   ps = " ++ show ps ++ "\n") False = undefined
+chkAll _X _P xs ps | track ("chkAll:\n   xs = " ++ fugly xs ++ "\n   ps = " ++ fugly ps ++ "\n") False = undefined
 chkAll _X _P xs ps = case ps of
   Nil -> return (Nil, xs)
   Single p -> (consView <$> weakChkEval (List _X, xs)) >>= \case
@@ -670,7 +670,7 @@ chkAll _X _P xs ps = case ps of
     -- We have th : Thinning _W (xs' :-: List f) ws
     -- for xs' a prefix of xs whose suffix we must compute.
       ws <- weakChkEval (List _W, ws)
-      th <- track ("chkAll calling weakChkThinning " ++ show th) $ return th
+      th <- track ("chkAll calling weakChkThinning " ++ fugly th) $ return th
       (ws', th) <- weakChkThinning _W th ws
       (xs', xs'') <- unmapprefix _X f _W xs ws'
       ps' <- weakAdapt e (AllT _W _R ws) (AllT f g th) (AllT _X _P xs')
@@ -735,7 +735,7 @@ weakFind as x = weakChkEval (List Atom, as) >>= \case
 
 -- assumes types are in whnf and V-closed
 weakAdapt :: SynTm -> ChkTm -> Adapter -> ChkTm -> TCM ChkTm
-weakAdapt e src a tgt | track ("weakAdapt:\n   e = " ++ show e ++ "\n   src = " ++ show src ++ "\n   a = " ++ show a ++ "\n   tgt = " ++ show tgt ++ "\n") False = undefined
+weakAdapt e src a tgt | track ("weakAdapt:\n   e = " ++ wugly e ++ "\n   src = " ++ fugly src ++ "\n   a = " ++ fugly a ++ "\n   tgt = " ++ fugly tgt ++ "\n") False = undefined
 weakAdapt ((e :-: a) ::: _) mid b tgt = do
   (e , src) <- weakEvalSyn e
   ab <- adapterSemicolon src a mid b tgt
@@ -875,13 +875,13 @@ expandTh0 _X de = do
     ys -> return Th0
 
 etaThinning :: SynTm -> ChkTm -> TCM ChkTm
-etaThinning e src | track ("etaThinning:\n   e = " ++ show e ++ "\n   src = " ++ show src) False = undefined
+etaThinning e src | track ("etaThinning:\n   e = " ++ wugly e ++ "\n   src = " ++ fugly src) False = undefined
 etaThinning e (Thinning _W ga0 de0) = do
   ga0 <- weakChkEval (List _W, ga0)
   case ga0 of
     Nil -> expandTh0 _W de0
     _   -> return (upsE e)
-etaThinning e ty = error ("etaThinning called with " ++ show e ++ " and type " ++ show ty)
+etaThinning e ty = error ("etaThinning called with " ++ wugly e ++ " and type " ++ fugly ty)
 
 isNormalIdThinning :: ChkTm -> Bool
 isNormalIdThinning Nil           = True
@@ -905,7 +905,7 @@ consView xs = xs
 -- de is head normal
 -- returns (origin, evaled thinning)
 weakChkThinning :: ChkTm -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)
-weakChkThinning _X th de | track ("weakChkThinning:\n   th = " ++ show th ++ "\n   de = " ++ show de ++ "\n") False = undefined
+weakChkThinning _X th de | track ("weakChkThinning:\n   th = " ++ fugly th ++ "\n   de = " ++ fugly de ++ "\n") False = undefined
 weakChkThinning _X th de = case th of
   Th1 -> case consView de of
     Nil -> return (Nil, NoThin)
@@ -976,7 +976,7 @@ reconstructThinningAdapterTarget src@(Thinning _W ga0 de0) a _X de = do
       return (ga, Thinning _X ga de)
     Thinning f ph ps -> do
       lfga0 <- weakChkEval (List _X, (ga0 ::: List _W) :-: List f)
-      ph <- track ("reconstructThAdTa calls weakChkThinning " ++ show ph) $ return ph
+      ph <- track ("reconstructThAdTa calls weakChkThinning " ++ fugly ph) $ return ph
       (ga, _) <- weakChkThinning _X ph lfga0
       return (ga, Thinning _X ga de)
 
@@ -1798,6 +1798,32 @@ nomo (List One) = "n"
 nomo (List _X) = nomo _X ++ "s"
 nomo (Thinning _ _ _) = "th"
 nomo _ = "x"
+
+fugly :: ChkTm -> String
+fugly (A "0") = "0"
+fugly (A "1") = "1"
+fugly ((x :++: y) :++: z) = fugly (x :++: (y :++: z))
+fugly (Thinning t as bs) = "(Thinning " ++ fugly t ++ " " ++ fugly as ++ " " ++ fugly bs ++ ")"
+fugly (List t) = "(List " ++ fugly t ++ ")"
+fugly (Enum xs) = "(Enum " ++ fugly xs ++ ")"
+fugly (Single x) = "[" ++ fugly x ++ "]"
+fugly (Lam b) = "(\\ " ++ fugly b ++ ")"
+fugly Nil = "[]"
+fugly (Cons x xs) = case (fugly x, fugly xs) of
+  (x, "[]") ->  "[" ++ x ++ "]"
+  (x, '[' : xs) -> "[" ++ x ++ ", " ++ xs
+  (x, xs) -> "[" ++ x ++ "] ++ " ++ xs
+fugly (x :++: y) = fugly x ++ " ++ " ++ fugly y
+fugly (ThSemi th ph) = "(" ++ fugly th ++ "; " ++ fugly ph ++ ")"
+fugly (E e) = if elem ' ' s then "(" ++ s ++ ")" else s where
+  s = wugly e
+fugly (e :-: a) = wugly e ++ " - " ++ fugly a
+fugly t = show t
+
+wugly :: SynTm -> String
+wugly (e :$ s) = wugly e ++ " " ++ fugly s
+wugly (t ::: ty) = "(" ++ fugly t ++ " : " ++ fugly ty ++ ")"
+wugly e = show e
 
 
 -- testing

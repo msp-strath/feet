@@ -28,7 +28,7 @@ import Utils.Bwd
 import Debug.Trace
 
 -- track = trace
-track = tracko
+track = trace
 tracko x = id
 
 
@@ -49,6 +49,7 @@ pattern E e = e :-: Idapter
 
 pattern Idapter = A "Idapter" -- identity
 -- List f, where f is an arbitrary function
+
 
 data Syn
   m -- what's the meta
@@ -779,6 +780,17 @@ weakAdapt (t ::: _) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) = case consVie
           qs <- weakAdapt (ps ::: AllT _X _P xs) (AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys)
           return (Cons (upsE q) qs)
       th -> return ((Cons p ps ::: AllT _X _P (Cons x xs)) :-: AllT f g th) -- or this; should have an eliminator that gets stuck here instead
+weakAdapt e (Enum as) (Enum th) (Enum bs) =
+    (consThView <$> weakChkEval (Thinning Atom as bs, th)) >>= \case
+  Cons Th0 th -> (consView <$> weakChkEval (List Atom, bs)) >>= \case
+    Cons _ bs -> S <$> weakAdapt e (Enum as) (Enum th) (Enum bs)
+  Cons Th1 th -> case e of
+    (Z ::: _) -> return Z
+    (S t ::: _) -> (consView <$> weakChkEval (List Atom, as)) >>= \case
+      Cons a as -> (consView <$> weakChkEval (List Atom, bs)) >>= \case
+        Cons b bs -> S <$> weakAdapt (t ::: Enum as) (Enum as) (Enum th) (Enum bs)
+    _ -> return (e :-: Enum (Cons Th1 th))
+  th -> return (e :-: th) -- includes impossible th = Nil case
 weakAdapt e src a tgt = return (e :-: a)
 
 mapThin :: ChkTm -> ChkTm -> ChkTm -> ChkTm -> TCM ChkTm
@@ -845,6 +857,7 @@ adapterSemicolon inn@(AllT _X _P xs) (AllT f g th) (AllT _Y _Q ys) (AllT f' g' p
   let pha = (ph ::: Thinning _Y ((zs ::: List _Z) :-: List f') ys) :-: List f -- Thinning _X (zs :-: List f';f) (ys :-: List f)
   let phath = ThSemi pha th
   return (AllT ff' gg' phath)
+adapterSemicolon (Enum as) (Enum th) (Enum bs) (Enum ph) (Enum cs) = return (Enum (ThSemi th ph))
 
 expandThinAdapter :: Adapter -> (ChkTm, ChkTm, ChkTm)
 expandThinAdapter Idapter = (Lam (E (V 0)), Th1, Th1)
@@ -913,6 +926,7 @@ weakChkThinning _X th de = case th of
       de <- weakChkEval (List _X, de)
       (ga, th) <- weakChkThinning _X th de
       return (ga, Cons Th0 th)
+    x -> error $ show x
   ThSemi th ph -> do
     (mu, ph) <- weakChkThinning _X ph de
     (ga, th) <- weakChkThinning _X th mu
@@ -1135,6 +1149,9 @@ normalisers = (refresh "n" . go, refresh "n" . stop) where
     if eq then return Idapter else do
       f' <- go (Pi src tgt, f)
       return (List f')
+  quad (Enum as) (Enum th) (Enum bs) = do
+    (as', th') <- quoth Atom th bs
+    if isNormalIdThinning th' then return Idapter else return (Enum th')
   quad (Thinning src ga de) (List f) (Thinning tgt ga' de') = quad (List src) (List f) (List tgt)
   quad (Thinning src ga de) (Thinning f th ph) (Thinning tgt ga' de') = do
     lfga <- weakChkEval (List tgt, (ga ::: List src) :-: List f)
@@ -1381,10 +1398,35 @@ pattern Atom = A "Atom"
 
 pattern Enum as = A "Enum" :& as -- as is a list of Atoms
 
-pattern EnumElim _P ms = A "EnumElim" :& (B _P) :& ms
+pattern Enumerate = A "enumerate"
+pattern Pose = A "pose"
 
   -- introduced by a number (less than the length of as), or, also an Atom in the list (optionally paired with a number)
 
+enumerateElim = ElimRule
+  { targetType = List Atom
+  , eliminator = Enumerate
+  , elimPremisses = []
+  , reductType = List (Enum (E (V 0)))
+  , betaRules = [(Nil, Ret $ Nil), (Cons (pm "a") (pm "as"), Ret $ Cons Z (((em "as" ::: List Atom) :$ Enumerate) :-: List (Lam $ S (E (V 0)))))]
+  , fusionRules = []
+  }
+
+poseElim = ElimRule
+  { targetType = Enum (pm "as")
+  , eliminator = Pose
+  , elimPremisses = []
+  , reductType = Thinning (Enum (em "as")) (Single (E (V 0))) (E $ (em "as" ::: List Atom) :$ Enumerate)
+  , betaRules = [ (Z, Ret $ Cons Th1 Th0)
+                , (S (pm "x"), Case (List Atom) (em "as")
+                    [(Cons (pm "a") (pm "as'"), Ret $ Cons Th0 (((em "x" ::: Enum (em "as'")) :$ Pose) :-: Thinning (Lam $ S (E (V 0))) Th1 (Cons Th0 Th1)))])
+                ]
+  , fusionRules = [] -- TODO: could maybe fuse with Enum-adapters, but even the type takes some work
+  }
+
+pattern EnumElim _P ms = A "EnumElim" :& (B _P) :& ms
+
+-- looks dodgy; is P applied to Enums or Atoms?
 enumElim = ElimRule
   { targetType = Enum (pm "as")
   , eliminator = EnumElim (pm "P") (pm "ms")
@@ -1403,6 +1445,7 @@ enumElim = ElimRule
     ]
   , fusionRules = []
   }
+
 
 -- Free Abelian groups
 
@@ -1432,7 +1475,7 @@ data (f :+: g) x = InL (f x) | InR (g x)
   deriving (Functor, Foldable, Traversable)
 
 ourSetup = Setup
-  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, enumElim, onlyElim]
+  { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, onlyElim, enumerateElim, poseElim, enumElim]
   , weakAnalyserSetup = \ x -> case x of
       (Ty, Enum as) -> return $ Just $ WeakAnalysis (I (List Atom, as)) (\ (I as') -> Enum as')
       (Ty, AllT _X _P xs) -> return $ Just $ WeakAnalysis (I (Ty, _X) :*: I (List _X, xs)) (\ (I _X' :*: I xs') -> AllT _X' _P xs')

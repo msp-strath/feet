@@ -28,7 +28,7 @@ import Utils.Bwd
 import Debug.Trace
 
 -- track = trace
-track = trace
+track = tracko
 tracko x = id
 
 
@@ -962,6 +962,7 @@ weakChkThinning _X th de = case th of
     th <- etaThinning e src
     (ga, tgt) <- reconstructThinningAdapterTarget src a _X de
     -- a <- weakEvalAdapter src a tgt
+    track ("weakCheckThinning adapts " ++ fugly th ++ " from " ++ fugly src ++ " via " ++ fugly a ++ " to " ++ fugly tgt) $ return ()
     t <- weakAdapt (th ::: src) src a tgt
     return (ga, t)
 
@@ -976,7 +977,7 @@ reconstructThinningAdapterTarget src@(Thinning _W ga0 de0) a _X de = do
       return (ga, Thinning _X ga de)
     Thinning f ph ps -> do
       lfga0 <- weakChkEval (List _X, (ga0 ::: List _W) :-: List f)
-      ph <- track ("reconstructThAdTa calls weakChkThinning " ++ fugly ph) $ return ph
+      ph <- track ("reconstructThAdTa calls weakChkThinning " ++ fugly ph ++ " from " ++ fugly lfga0) $ return ph
       (ga, _) <- weakChkThinning _X ph lfga0
       return (ga, Thinning _X ga de)
 
@@ -1021,8 +1022,10 @@ weakEvalSyn (e :$ s) = do
           _ -> fail "weakEvalSyn: more than one fusion rule applies"
       (t ::: _) -> runProg m t (betaRules rule) >>= \case
         Just y -> do
+          track ("betastep:\n  target = " ++ wugly e ++ " : " ++ fugly ty ++ "\n  eliminator = " ++ fugly s ++ "\n  reduct = " ++ fugly y ++ " : " ++ fugly rTy) $ return ()
           r <- weakChkEval (rTy, y)
-          return (r ::: rTy)
+          track ("betastop:\n  target = " ++ wugly e ++ " : " ++ fugly ty ++ "\n  eliminator = " ++ fugly s ++ "\n  reduct = " ++ fugly r ++ " : " ++ fugly rTy) $ return
+            (r ::: rTy)
         Nothing -> return (e :$ s)
       _ -> return (e :$ s)
 
@@ -1424,7 +1427,8 @@ poseElim = ElimRule
   , reductType = Thinning (Enum (em "as")) (Single (E (V 0))) (E $ (em "as" ::: List Atom) :$ Enumerate)
   , betaRules = [ (Z, Ret $ Cons Th1 Th0)
                 , (S (pm "x"), Case (List Atom) (em "as")
-                    [(Cons (pm "a") (pm "as'"), Ret $ Cons Th0 (((em "x" ::: Enum (em "as'")) :$ Pose) :-: Thinning (Lam $ S (E (V 0))) Th1 (Cons Th0 Th1)))])
+                    [(Cons (pm "a") (pm "as'"), Ret $ Cons Th0 (((em "x" ::: Enum (em "as'")) :$ Pose) :-: List (Lam $ S (E (V 0)))))])
+                        -- Thinning (Lam $ S (E (V 0))) Th1 (Cons Th0 Th1)))])
                 ]
   , fusionRules = [] -- TODO: could maybe fuse with Enum-adapters, but even the type takes some work
   }
@@ -1874,6 +1878,7 @@ myEnum = Enum (Cons (A "a") (Cons (A "c") (Cons (A "c") Nil)))
 myEnumNeut = Enum (Cons (A "a") (Cons (E (P [("q", 0)] (Hide Atom))) (Cons (A "c") Nil)))
 
 listABC = (Cons (A "a") (Cons (A "b") (Cons (A "c") Nil)))
+listAB = (Cons (A "a") (Cons (A "b") Nil))
 
 predABC = P [("P", 0)] (Hide (Pi (Enum listABC) Ty))
 

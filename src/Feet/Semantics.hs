@@ -759,6 +759,7 @@ weakChkThinning _X th de = case th of
     track ("weakCheckThinning adapts " ++ fugly th ++ " from " ++ fugly src ++ " via " ++ fugly a ++ " to " ++ fugly tgt) $ return ()
     t <- weakAdapt (th ::: src) src a tgt
     return (ga, t)
+  x -> error $ fugly x
 
 
 reconstructThinningAdapterTarget :: ChkTm -> Adapter -> ChkTm -> ChkTm -> TCM (ChkTm, ChkTm)

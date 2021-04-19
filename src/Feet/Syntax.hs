@@ -19,7 +19,7 @@ data Chk
   = A String       -- atoms
   | Chk m :& Chk m -- pairs
   | B (Chk m)      -- binder
-  | (:-:) (Syn m) (Chk m) -- embedding Syn
+  | (:-:) (Syn m) (Chk m) -- embedding Syn, with adapter
   | M m            -- metas
   deriving (Show, Functor, Eq, Ord)
 

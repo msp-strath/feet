@@ -39,7 +39,7 @@ chkPrint Ty _T p = case _T of
     (v, _T') <- fresh (nomo _S, _S) $ \ x ->
       (,) <$> (fst <$> printSyn x 0) <*> chkPrint Ty (_T // x) 0
     return . paren p pArg $ concat ["(", v, " : ", _S', ") * ", _T']
-  One -> return "1"
+  One -> return "One"
   Nat -> return "Nat"
   List _X -> do
     _X' <- chkPrint Ty _X pArg

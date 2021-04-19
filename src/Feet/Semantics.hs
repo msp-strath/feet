@@ -1005,12 +1005,9 @@ normSyn e = do
   (e, t) <- weakEvalSyn e
   normalise (t, upsE e)
 
--- Type
-pattern Ty = A "Ty"
+-- elim rules
 
 -- Pi
-pattern Pi s t = A "Pi" :& s :& B t
-pattern Lam t = A "lam" :& B t
 
 piElim = ElimRule
   { targetType = Pi (pm "S") (pm "T")
@@ -1023,10 +1020,6 @@ piElim = ElimRule
   where si = B0 :< (em "s" ::: em "S")
 
 -- Sigma
-pattern Sg s t = A "Sg" :& s :& B t
--- Pair s t = s :& t
-pattern Fst = A "fst"
-pattern Snd = A "snd"
 
 fstElim = ElimRule
   { targetType = Sg (pm "S") (pm "T")
@@ -1047,21 +1040,9 @@ sndElim = ElimRule
   }
   where si = B0 :< (V 0 :$ Fst)
 
--- One
-pattern One = A "One"
-pattern Void = A ""
-
 -- List
-pattern List _X = A "List" :& _X
-pattern Nil = A ""
-pattern Single x = A "single" :& x
-pattern (:++:) xs ys = A "append" :& xs :& ys
-pattern Cons x xs = Single x :++: xs
-pattern ListElim p n c = A "ListElim" :& B p :& n :& B (B (B c))
 
-pattern Hom f = A "hom" :& f
-
-infixr 4 :++:, ++++
+infixr 4 ++++
 
 (++++) :: ChkTm -> ChkTm -> ChkTm
 Nil ++++ bs = bs
@@ -1108,12 +1089,7 @@ listElim = ElimRule
     ]
   }
 
--- Predicate lifting of List
-
-pattern AllT _X _P xs = A "All" :& _X :& (B _P) :& xs
--- constructors overloaded Nil, Single, :++:
-
-pattern Only = A "only"
+-- All
 
 onlyElim = ElimRule
   { targetType = AllT (pm "X") (pm "P") (Single (pm "x"))
@@ -1161,49 +1137,7 @@ allPElim = ElimRule
     ]
   }
 
-
-
--- Nat
-
-pattern Nat = List One
-
-pattern Z = Nil
-pattern S x = Cons Void x
-
-
-instance Num (Chk a) where
-  fromInteger 0 = Z
-  fromInteger n = S (fromInteger (n-1))
-  (+) = error "TODO"
-  (*) = error "TODO"
-  (-) = error "TODO"
-  abs = error "TODO"
-  signum = error "TODO"
-
--- Thinnings
-
-pattern Thinning _X ga de = A "Th" :& _X :& ga :& de
-
-pattern Th1 = A "1"  -- id thinning between neutral lists (also a bit)
-pattern Th0 = A "0"  -- empty thinning from Nil to a neutral lists (also a bit)
-pattern NoThin = Nil -- the thinning from Nil to Nil
-pattern ThSemi th th' = A ";" :& th :& th'
-
--- Atoms
-
-pattern Atom = A "Atom"
-
-  -- introduced by `A s` for nonempty `s`
-
--- Enumerations
-
-pattern Enum as = A "Enum" :& as -- as is a list of Atoms
-
-pattern Enumerate = A "enumerate"
-pattern Pose = A "pose"
-
-
-  -- introduced by a number (less than the length of as), or, also an Atom in the list (optionally paired with a number)
+-- Enum
 
 enumerateElim = ElimRule
   { targetType = List Atom
@@ -1249,14 +1183,7 @@ enumElim = ElimRule
   , fusionRules = []
   }
 
-
--- Free Abelian groups
-
-pattern FAb _X = A "FAb" :& _X
-pattern Eta x = A "Eta" :& x
-pattern FOne = A "1"
-pattern (:.:) x y = A "*" :& x :& y
-pattern Inv x = A "Inv" :& x
+-- Running in the TCM monad
 
 ourSetup = Setup
   { elimRules = [piElim, fstElim, sndElim, listElim, allPElim, onlyElim, enumerateElim, poseElim, enumElim]

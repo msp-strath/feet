@@ -75,7 +75,7 @@ pTel k = do
       pChk 0 >>= bind k xs)
       <|> k T0
     bind k [] s = pMore k
-    bind k (x : xs) s = push x (bind (k . (s :\:)) xs (s <^> Th (negate 2)))
+    bind k (x : xs) s = push x (bind (k . ((x,s) :\:)) xs (s <^> Th (negate 2)))
 
 pChk :: Int -> DBP ChkTm
 pChk l =
@@ -152,7 +152,7 @@ pChk l =
     where
     go :: Tel -> (ChkTm -> ChkTm -> ChkTm) -> ChkTm -> ChkTm
     go T0 bi body = body
-    go (s :\: t) bi body = bi s $ go t bi body
+    go ((x,s) :\: t) bi body = bi s $ go t bi body
 
 pAdapter :: Int -> DBP Adapter
 pAdapter l =
@@ -163,10 +163,15 @@ pAdapter l =
   <|> AllT <$ punc "All" <* spc <*> pChk l <* spc <*> pChk l <* spc <*> pChk l
   <|> pure Idapter
 
+pVar :: DBP SynTm
+pVar = do
+  x <- pId
+  V <$> dbix x
+
 pSyn :: Int -> DBP SynTm
 pSyn l = pHead >>= pMore l where
   pHead :: DBP SynTm
-  pHead = V <$> (pId >>= dbix)
+  pHead = pVar
       <|> do
             punc "(" <* spc
             s <- pChk 0 >>= novar
@@ -221,17 +226,15 @@ pList = pSome <|> pure Nil where
   pSome = ((Single <$> pChk 0) >>= pMore)
   pMore xs = (xs :++:) <$ spc <* punc "," <* spc <*> pSome <|> pure xs
 
-{-
 pTask :: DBP Task
 pTask = (pTel $ \ ga -> (ga :|-) <$ spc <* punc "|-" <* spc <*> pTask)
     <|> (pId >>= \ x ->
-         (:&) <$ spc <* punc "=" <* spc <*> ((x,) <$> pSyn 0)
+         (:&&) <$ spc <* punc "=" <* spc <*> ((x,) <$> pSyn 0)
          <* spc <* punc ";" <* spc
          <*> push x pTask)
     <|> pure Done
--}
 
 pGo :: DBP x -> String -> [x]
 pGo p s = do
-  (x, "") <- dbp p [] s
+  (x, "") <- dbp p mempty s
   return x

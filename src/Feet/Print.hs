@@ -17,10 +17,14 @@ import Feet.Semantics
 -- type-directed printing
 
 printNormSyn :: SynTm -> IO ()
-printNormSyn e = putStrLn . either id id . run $ do
+printNormSyn = putStrLn . either id id . run . prettyNormSyn
+
+prettyNormSyn :: SynTm -> TCM String
+prettyNormSyn e = do
   (e, t) <- weakEvalSyn e
   n <- normalise (t, upsE e)
   refresh "print" $ chkPrint t n 0
+
 
 chkPrint :: ChkTm -> ChkTm -> Int -> TCM String
 chkPrint Ty _T p = case _T of
